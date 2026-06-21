@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  spark-master:
+    image: bitnamilegacy/spark:3.5
+    container_name: delivery-platform-spark-master-1
+    environment:
+      - SPARK_MODE=master
+      - SPARK_MASTER_OPTS=-Dspark.ui.port=8080
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+    ports:
+      - "7077:7077"   # Spark Master port (used by Airflow & workers)
+      - "8081:8080"   # Spark Master Web UI port
+    volumes:
+      - ./jobs:/opt/bitnami/spark/jobs
+      - ./data:/opt/bitnami/spark/data
+      - $(GOOGLE_APPLICATION_CREDENTIALS) :/opt/bitnami/spark/conf/gcs-key.json
+    mem_limit: 3g
+
+  spark-worker:
+    image: bitnamilegacy/spark:3.5
+    container_name: delivery-platform-spark-worker-1
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_MEMORY=10G
+      - SPARK_WORKER_CORES=4
+      - SPARK_EXTRA_CLASSPATH=/opt/bitnami/spark/jars/sedona-spark-shaded-3.0_2.12-1.5.1.jar:/opt/bitnami/spark/jars/geotools-wrapper-1.5.1-28.2.jar:/opt/bitnami/spark/jars/gcs-connector.jar
+    volumes:
+      - ./jobs:/opt/bitnami/spark/jobs
+      - ./data:/opt/bitnami/spark/data
+      - ./jars:/opt/bitnami/spark/jars
+      - ./conf/gcs_key.json:/opt/bitnami/spark/conf/gcs-key.json
+    depends_on:
+      - spark-master
+    mem_limit: 12g
+
+volumes:
+  spark_data:
