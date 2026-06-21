@@ -223,5 +223,5 @@ __marimo__/
 # .db database files
 .db
 airflow/airflow.db
-
+.DS_Store
 .jsoningestion/roads_test.json
