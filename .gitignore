@@ -217,5 +217,11 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-.json
+# jar files
+.jar
+
+# .db database files
 .db
+airflow/airflow.db
+
+.jsoningestion/roads_test.json
