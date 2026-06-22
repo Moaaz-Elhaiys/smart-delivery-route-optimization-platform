@@ -15,7 +15,8 @@ services:
     volumes:
       - ./jobs:/opt/bitnami/spark/jobs
       - ./data:/opt/bitnami/spark/data
-      - $(GOOGLE_APPLICATION_CREDENTIALS):/opt/bitnami/spark/conf/gcs-key.json
+      - ./jars:/opt/bitnami/spark/custom_jars
+      - ${GOOGLE_APPLICATION_CREDENTIALS}:/opt/bitnami/spark/conf/gcs-key.json
     mem_limit: 3g
 
   spark-worker:
@@ -26,12 +27,12 @@ services:
       - SPARK_MASTER_URL=spark://spark-master:7077
       - SPARK_WORKER_MEMORY=10G
       - SPARK_WORKER_CORES=4
-      - SPARK_EXTRA_CLASSPATH=/opt/bitnami/spark/jars/sedona-spark-shaded-3.0_2.12-1.5.1.jar:/opt/bitnami/spark/jars/geotools-wrapper-1.5.1-28.2.jar:/opt/bitnami/spark/jars/gcs-connector.jar
+      - SPARK_EXTRA_CLASSPATH=/opt/bitnami/spark/custom_jars/sedona-spark-shaded-3.0_2.12-1.5.1.jar:/opt/bitnami/spark/custom_jars/geotools-wrapper-1.5.1-28.2.jar:/opt/bitnami/spark/custom_jars/gcs-connector.jar
     volumes:
       - ./jobs:/opt/bitnami/spark/jobs
       - ./data:/opt/bitnami/spark/data
-      - ./jars:/opt/bitnami/spark/jars
-      - $(GOOGLE_APPLICATION_CREDENTIALS):/opt/bitnami/spark/conf/gcs-key.json
+      - ./jars:/opt/bitnami/spark/custom_jars
+      - ${GOOGLE_APPLICATION_CREDENTIALS}:/opt/bitnami/spark/conf/gcs-key.json
     depends_on:
       - spark-master
     mem_limit: 12g
