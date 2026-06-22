@@ -2,12 +2,14 @@ from airflow import DAG
 from airflow.operators.python import PythonOperator
 from datetime import datetime
 import sys
-sys.path.insert(0,"/Users/elhaiys/Desktop/Desktop/vs projects/Smart-Delivery-Route-Optimization-Platform")
+
+sys.path.insert(0,"/Users/elhaiys/Desktop/Desktop/vs projects/smart-delivery-route-optimization-platform")
 
 from ingestion.overpass_client import fetch_roads
 from ingestion.data_simulator import simulate_orders, simulate_drivers
 from ingestion.bronze_writer import upload_to_bronze
 from ingestion.schemas import (validate_roads,validate_orders,validate_drivers)
+
 def ingest_roads(**context):
     data = fetch_roads()
     validate_roads(data) 

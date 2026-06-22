@@ -26,30 +26,44 @@ def fetch_roads(bbox=CAIRO_BBOX, max_retries=3, backoff_seconds=10):
 
     for attempt in range(1, max_retries + 1):
         try:
-                        logger.info(f"Fetching roads, attempt {attempt}")
-                        response = requests.post(
-                            OVERPASS_URL,
-                            data={"data": query},
-                            headers={
-                                "User-Agent": "Smart-Delivery-Route-Optimization-Platform/1.0"
-                            },
-                            timeout=120,
+            logger.info(f"Fetching roads, attempt {attempt}/{max_retries}")
+            response = requests.post(
+                OVERPASS_URL,
+                data={"data": query},
+                headers={
+                    "User-Agent": "Smart-Delivery-Route-Optimization-Platform/1.0"
+                },
+                timeout=120, # Client-side timeout
             )
-                        response.raise_for_status()
-                        data = response.json()
-                        logger.info(f"Fetched {len(data.get('elements', []))} road elements")
-                        return data
+            response.raise_for_status()
+            data = response.json()
+            logger.info(f"Fetched {len(data.get('elements', []))} road elements")
+            return data
+
         except requests.exceptions.HTTPError as e:
-            if response.status_code != 429:
+            # Retry on Rate Limits (429) OR Server Errors (5xx like 504, 502, 500)
+            if response.status_code == 429 or response.status_code >= 500:
+                wait = backoff_seconds * (2 ** attempt)
+                logger.warning(f"HTTP {response.status_code} encountered. Waiting {wait}s before retry.")
+                time.sleep(wait)
+            else:
+                # If it's a 400 Bad Request, retrying won't fix your query. Fail immediately.
+                logger.error(f"Fatal HTTP Error {response.status_code}: {response.text}")
                 raise
-            wait = backoff_seconds * (2 ** attempt)
-            logger.warning(f"Rate limited. Waiting {wait}s before retry.")
-            time.sleep(wait)
+
         except requests.exceptions.Timeout:
-            logger.warning(f"Timeout on attempt {attempt}. Retrying...")
+            # Handles client-side timeouts
+            wait = backoff_seconds * (2 ** attempt)
+            logger.warning(f"Client timeout on attempt {attempt}. Waiting {wait}s before retry.")
+            time.sleep(wait)
+
+        except requests.exceptions.RequestException as e:
+            # Handles dropped connections, DNS failures, etc.
+            logger.warning(f"Connection error on attempt {attempt}: {e}")
             time.sleep(backoff_seconds)
 
-    raise RuntimeError("Max retries exceeded fetching OSM data")
+    # If the loop finishes without returning, we are out of retries
+    raise Exception(f"Failed to fetch roads after {max_retries} attempts.")
 
 # terminal test
 if __name__ == "__main__":
