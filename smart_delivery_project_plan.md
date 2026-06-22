@@ -361,7 +361,8 @@ services:
     volumes:
       - ./jobs:/opt/bitnami/spark/jobs
       - ./data:/opt/bitnami/spark/data
-      - $(GOOGLE_APPLICATION_CREDENTIALS):/opt/bitnami/spark/conf/gcs-key.json
+      - ./jars:/opt/bitnami/spark/custom_jars
+      - ${GOOGLE_APPLICATION_CREDENTIALS}:/opt/bitnami/spark/conf/gcs-key.json
     mem_limit: 3g
 
   spark-worker:
@@ -372,12 +373,12 @@ services:
       - SPARK_MASTER_URL=spark://spark-master:7077
       - SPARK_WORKER_MEMORY=10G
       - SPARK_WORKER_CORES=4
-      - SPARK_EXTRA_CLASSPATH=/opt/bitnami/spark/jars/sedona-spark-shaded-3.0_2.12-1.5.1.jar:/opt/bitnami/spark/jars/geotools-wrapper-1.5.1-28.2.jar:/opt/bitnami/spark/jars/gcs-connector.jar
+      - SPARK_EXTRA_CLASSPATH=/opt/bitnami/spark/custom_jars/sedona-spark-shaded-3.0_2.12-1.5.1.jar:/opt/bitnami/spark/custom_jars/geotools-wrapper-1.5.1-28.2.jar:/opt/bitnami/spark/custom_jars/gcs-connector.jar
     volumes:
       - ./jobs:/opt/bitnami/spark/jobs
       - ./data:/opt/bitnami/spark/data
-      - ./jars:/opt/bitnami/spark/jars
-      - $(GOOGLE_APPLICATION_CREDENTIALS):/opt/bitnami/spark/conf/gcs-key.json
+      - ./jars:/opt/bitnami/spark/custom_jars
+      - ${GOOGLE_APPLICATION_CREDENTIALS}:/opt/bitnami/spark/conf/gcs-key.json
     depends_on:
       - spark-master
     mem_limit: 12g
@@ -852,9 +853,8 @@ def create_spark():
         .getOrCreate()
 
 def clean_orders(spark, run_date):
-    raw_path = f"gs://delivery-data-lake-yourname/bronze/orders/{run_date}/"
-
-    df = spark.read.json(raw_path)
+    raw_path = f"gs://delivery-data-lake/bronze/orders/{run_date}/"
+    df = spark.read.option("multiline", "true").json(raw_path)
 
     cleaned = df \
         .filter(F.col("lat").isNotNull() & F.col("lon").isNotNull()) \
@@ -867,13 +867,13 @@ def clean_orders(spark, run_date):
         .dropDuplicates(["order_id"])
 
     # Data quality metrics
-    total     = df.count()
-    valid     = cleaned.count()
+    total = df.count()
+    valid = cleaned.count()
     drop_rate = round((total - valid) / total * 100, 2)
     print(f"Orders: {total} raw → {valid} clean ({drop_rate}% dropped)")
     assert drop_rate < 5.0, f"Drop rate {drop_rate}% exceeds 5% threshold — check data quality"
 
-    silver_path = f"gs://delivery-data-lake-yourname/silver/orders/{run_date}/"
+    silver_path = f"gs://delivery-data-lake/silver/orders/{run_date}/"
     cleaned.write.mode("overwrite").parquet(silver_path)
     print(f"Written to {silver_path}")
 
@@ -881,6 +881,8 @@ if __name__ == "__main__":
     import sys
     run_date = sys.argv[1]  # e.g. "2024-01-15"
     spark = create_spark()
+    # ADD THIS LINE: Tells Spark to only log Warnings and Errors
+    spark.sparkContext.setLogLevel("WARN")
     clean_orders(spark, run_date)
     spark.stop()
 ```
