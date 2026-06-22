@@ -14,7 +14,7 @@ def create_spark():
 
 def clean_orders(spark, run_date):
     raw_path = f"gs://delivery-data-lake/bronze/orders/{run_date}/"
-    df = spark.read.json(raw_path)
+    df = spark.read.option("multiline", "true").json(raw_path)
 
     cleaned = df \
         .filter(F.col("lat").isNotNull() & F.col("lon").isNotNull()) \
@@ -39,7 +39,9 @@ def clean_orders(spark, run_date):
 
 if __name__ == "__main__":
     import sys
-    run_date = sys.argv[0]  # e.g. "2024-01-15"
+    run_date = sys.argv[1]  # e.g. "2024-01-15"
     spark = create_spark()
+    # ADD THIS LINE: Tells Spark to only log Warnings and Errors
+    spark.sparkContext.setLogLevel("WARN")
     clean_orders(spark, run_date)
     spark.stop()
