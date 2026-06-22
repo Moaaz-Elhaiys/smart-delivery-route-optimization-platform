@@ -226,4 +226,6 @@ airflow/airflow.db
 .DS_Store
 *.json
 /airflow/logs/
+/airflow/logs/scheduler/
+/airflow/airflow.cfg
 
