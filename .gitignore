@@ -218,12 +218,12 @@ __marimo__/
 .streamlit/secrets.toml
 
 # jar files
-.jar
+*.jar
 
 # .db database files
 .db
 airflow/airflow.db
 .DS_Store
-.jsoningestion/roads_test.json
 *.json
 /airflow/logs/
+
