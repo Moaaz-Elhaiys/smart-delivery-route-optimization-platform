@@ -344,7 +344,6 @@ Download from docker.com — enable WSL2 backend during install.
 Save this to `C:\projects\delivery-platform\docker-compose.yml`:
 
 ```yaml
-version: '3.8'
 services:
   spark-master:
     image: bitnamilegacy/spark:3.5
@@ -362,7 +361,7 @@ services:
     volumes:
       - ./jobs:/opt/bitnami/spark/jobs
       - ./data:/opt/bitnami/spark/data
-      - ./conf/gcs-key.json:/opt/bitnami/spark/conf/gcs-key.json
+      - $(GOOGLE_APPLICATION_CREDENTIALS):/opt/bitnami/spark/conf/gcs-key.json
     mem_limit: 3g
 
   spark-worker:
@@ -378,7 +377,7 @@ services:
       - ./jobs:/opt/bitnami/spark/jobs
       - ./data:/opt/bitnami/spark/data
       - ./jars:/opt/bitnami/spark/jars
-      - ./conf/gcs-key.json:/opt/bitnami/spark/conf/gcs-key.json
+      - $(GOOGLE_APPLICATION_CREDENTIALS):/opt/bitnami/spark/conf/gcs-key.json
     depends_on:
       - spark-master
     mem_limit: 12g
