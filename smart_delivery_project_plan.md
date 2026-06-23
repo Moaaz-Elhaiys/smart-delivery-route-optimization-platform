@@ -886,10 +886,22 @@ if __name__ == "__main__":
     clean_orders(spark, run_date)
     spark.stop()
 ```
+#### Test it inside docker container
+```bash
+docker exec -u 0 -it delivery-platform-spark-master-1 bash
 
+spark-submit --master spark://spark-master:7077 --jars /opt/bitnami/spark/custom_jars/sedona-spark-shaded.jar,/opt/bitnami/spark/custom_jars/geotools-wrapper.jar,/opt/bitnami/spark/custom_jars/gcs-connector.jar /opt/bitnami/spark/jobs/spatial_processing.py 2026-06-22
+```
 ### Week 6 — Apache Sedona Spatial Operations
 
 This is the heart of the geospatial learning. Take it slow.
+#### Install sedona inside docker container
+```bash
+docker exec --user root delivery-platform-spark-master-1 bash -c "apt-get update && apt-get install -y gcc python3-dev && pip install apache-sedona==1.5.1 shapely"
+
+docker exec --user root delivery-platform-spark-worker-1 bash -c "apt-get update && apt-get install -y gcc python3-dev && pip install apache-sedona==1.5.1 shapely"
+```
+#### spark & sedona pocessing
 
 ```python
 # jobs/spatial_processing.py (runs on Windows Spark cluster)
@@ -983,6 +995,12 @@ if __name__ == "__main__":
     spark.sparkContext.setLogLevel("WARN")
     run_spatial_jobs(spark, run_date)
     spark.stop()
+```
+#### Test it inside docker container
+```bash
+docker exec -u 0 -it delivery-platform-spark-master-1 bash
+
+spark-submit --master spark://spark-master:7077 --jars /opt/bitnami/spark/custom_jars/sedona-spark-shaded.jar,/opt/bitnami/spark/custom_jars/geotools-wrapper.jar,/opt/bitnami/spark/custom_jars/gcs-connector.jar /opt/bitnami/spark/jobs/spatial_processing.py 2026-06-22
 ```
 
 ### Week 7 — Road Network Processing

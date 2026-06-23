@@ -7,8 +7,8 @@ from sedona.utils import SedonaKryoRegistrator, KryoSerializer
 def create_sedona_spark():
     return SparkSession.builder \
         .appName("SpatialProcessing") \
-        .config("spark.serializer", KryoSerializer.getName()) \
-        .config("spark.kryo.registrator", SedonaKryoRegistrator.getName()) \
+        .config("spark.serializer", KryoSerializer.getName) \
+        .config("spark.kryo.registrator", SedonaKryoRegistrator.getName) \
         .config("spark.hadoop.google.cloud.auth.service.account.json.keyfile",
                 "/opt/bitnami/spark/conf/gcs-key.json") \
         .config("spark.hadoop.fs.gs.impl",
@@ -18,7 +18,7 @@ def create_sedona_spark():
 def run_spatial_jobs(spark, run_date):
     SedonaRegistrator.registerAll(spark)
     # --- Load silver data ---
-    orders_path = f"gs://delivery-data-lake-yourname/silver/orders/{run_date}/"
+    orders_path = f"gs://delivery-data-lake/silver/orders/{run_date}/"
     orders = spark.read.parquet(orders_path)
     # --- Create geometry column from lat/lon ---
     # IMPORTANT: ST_Point takes (longitude, latitude) — not (lat, lon)
@@ -48,16 +48,16 @@ def run_spatial_jobs(spark, run_date):
 
     # --- LEARNING EXERCISE 2: Delivery hotspot detection using ST_Buffer ---
     hotspot_query = """
-        SELECT
-            district,
-            COUNT(*) as order_count,
-            ST_AsText(ST_Buffer(
-                ST_Transform(ST_Centroid(ST_Collect(geometry)), 'EPSG:4326', 'EPSG:32636'),
-                1000  -- 1km buffer around district centroid
-            )) as coverage_area_wkt
-        FROM orders
-        GROUP BY district
-    """
+            SELECT
+                district,
+                COUNT(*) as order_count,
+                ST_AsText(ST_Buffer(
+                    ST_Transform(ST_Centroid(ST_Union_Aggr(geometry)), 'EPSG:4326', 'EPSG:32636'),
+                    1000  -- 1km buffer around district centroid
+                )) as coverage_area_wkt
+            FROM orders
+            GROUP BY district
+        """
     hotspots = spark.sql(hotspot_query)
     hotspots.show()
 
@@ -74,10 +74,10 @@ def run_spatial_jobs(spark, run_date):
     )
 
     # --- Write Gold layer ---
-    gold_path = f"gs://delivery-data-lake-yourname/gold/orders_spatial/{run_date}/"
+    gold_path = f"gs://delivery-data-lake/gold/orders_spatial/{run_date}/"
     orders_with_distance.write.mode("overwrite").parquet(gold_path)
     hotspots.write.mode("overwrite").parquet(
-        f"gs://delivery-data-lake-yourname/gold/hotspots/{run_date}/"
+        f"gs://delivery-data-lake/gold/hotspots/{run_date}/"
     )
 
     print("Spatial processing complete")
