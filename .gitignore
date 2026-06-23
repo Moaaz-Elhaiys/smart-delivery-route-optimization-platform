@@ -228,4 +228,5 @@ airflow/airflow.db
 /airflow/logs/
 /airflow/logs/scheduler/
 /airflow/airflow.cfg
+airflow/logs/scheduler/
 
