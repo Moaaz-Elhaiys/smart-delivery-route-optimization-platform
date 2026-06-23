@@ -980,6 +980,7 @@ if __name__ == "__main__":
     import sys
     run_date = sys.argv[1]
     spark = create_sedona_spark()
+    spark.sparkContext.setLogLevel("WARN")
     run_spatial_jobs(spark, run_date)
     spark.stop()
 ```
