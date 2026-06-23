@@ -1010,12 +1010,24 @@ spark-submit --master spark://spark-master:7077 --jars /opt/bitnami/spark/custom
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from sedona.register import SedonaRegistrator
+from sedona.utils import SedonaKryoRegistrator, KryoSerializer
+
+def create_spark():
+    return SparkSession.builder \
+        .appName("RoadNetworkProcessing") \
+        .config("spark.serializer", KryoSerializer.getName) \
+        .config("spark.kryo.registrator", SedonaKryoRegistrator.getName) \
+        .config("spark.hadoop.google.cloud.auth.service.account.json.keyfile",
+                "/opt/bitnami/spark/conf/gcs-key.json") \
+        .config("spark.hadoop.fs.gs.impl",
+                "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem") \
+        .getOrCreate()
 
 def process_roads(spark, run_date):
     SedonaRegistrator.registerAll(spark)
 
     raw_path = f"gs://delivery-data-lake/bronze/roads/{run_date}/"
-    roads_raw = spark.read.json(raw_path)
+    roads_raw = spark.read.option("multiline", "true").json(raw_path)
 
     # Explode OSM elements array
     elements = roads_raw.select(F.explode("elements").alias("elem"))
@@ -1057,10 +1069,17 @@ if __name__ == "__main__":
     import sys
     run_date = sys.argv[1]
     spark = create_spark()
+    spark.sparkContext.setLogLevel("WARN")
     process_roads(spark, run_date)
     spark.stop()
 ```
+#### Test it inside docker container
 
+```bash
+docker exec -u 0 -it delivery-platform-spark-master-1 bash
+
+spark-submit   --master spark://spark-master:7077   --driver-memory 2G   --executor-memory 8G   --jars /opt/bitnami/spark/custom_jars/sedona-spark-shaded.jar,/opt/bitnami/spark/custom_jars/geotools-wrapper.jar,/opt/bitnami/spark/custom_jars/gcs-connector.jar   /opt/bitnami/spark/jobs/road_network_processing.py 2026-06-22
+```
 ### Airflow DAG for Spark Jobs (on Mac, triggers Windows)
 ```python
 # airflow/dags/spark_processing_dag.py
@@ -1070,7 +1089,8 @@ from datetime import datetime
 
 SPARK_SUBMIT = "docker exec delivery-platform-spark-master-1 spark-submit \
     --master spark://spark-master:7077 \
-    --jars /opt/bitnami/spark/jars/sedona-spark-shaded.jar,/opt/bitnami/spark/jars/geotools-wrapper.jar,/opt/bitnami/spark/jars/gcs-connector.jar \
+    --driver-memory 2G   --executor-memory 8G \
+    --jars /opt/bitnami/spark/custom_jars/sedona-spark-shaded.jar,/opt/bitnami/spark/custom_jars/geotools-wrapper.jar,/opt/bitnami/spark/custom_jars/gcs-connector.jar \
     /opt/bitnami/spark/jobs/{script} {run_date}"
 
 with DAG(
