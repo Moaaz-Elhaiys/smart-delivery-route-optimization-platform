@@ -1014,7 +1014,7 @@ from sedona.register import SedonaRegistrator
 def process_roads(spark, run_date):
     SedonaRegistrator.registerAll(spark)
 
-    raw_path = f"gs://delivery-data-lake-yourname/bronze/roads/{run_date}/"
+    raw_path = f"gs://delivery-data-lake/bronze/roads/{run_date}/"
     roads_raw = spark.read.json(raw_path)
 
     # Explode OSM elements array
@@ -1049,7 +1049,7 @@ def process_roads(spark, run_date):
         )
     )
 
-    silver_path = f"gs://delivery-data-lake-yourname/silver/roads/{run_date}/"
+    silver_path = f"gs://delivery-data-lake/silver/roads/{run_date}/"
     roads.write.mode("overwrite").parquet(silver_path)
     print(f"Roads written: {roads.count()} segments")
 
