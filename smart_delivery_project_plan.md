@@ -1091,7 +1091,6 @@ spark-submit   --master spark://spark-master:7077   --driver-memory 2G   --execu
 ### Airflow DAG for Spark Jobs (on Mac, triggers Windows)
 ```python
 # airflow/dags/spark_processing_dag.py
-f# airflow/dags/spark_processing_dag.py
 from airflow import DAG
 from airflow.providers.ssh.operators.ssh import SSHOperator
 from datetime import datetime
@@ -1358,7 +1357,45 @@ def solve_vrp_with_constraints(orders, drivers, depot_lat=30.0444, depot_lon=31.
     )
     search_params.time_limit.seconds = 60
 
-    return routing.SolveWithParameters(search_params)
+    solution = routing.SolveWithParameters(search_params)
+
+    if not solution:
+        # Check if the penalty for dropping orders was too high, or time windows too strict
+        raise RuntimeError("No VRP solution found — constraints are too tight.")
+
+    routes = []
+    total_distance_m = 0
+
+    for vehicle_id in range(len(drivers)):
+        driver  = drivers[vehicle_id]
+        index   = routing.Start(vehicle_id)
+        route   = {"driver_id": driver["driver_id"], "stops": [], "total_distance_m": 0}
+
+        while not routing.IsEnd(index):
+            node_index = manager.IndexToNode(index)
+            if node_index != 0:  # skip depot
+                route["stops"].append({
+                    "order_id": all_nodes[node_index]["order_id"],
+                    "lat":      all_nodes[node_index]["lat"],
+                    "lon":      all_nodes[node_index]["lon"],
+                    "sequence": len(route["stops"]) + 1,
+                })
+            
+            previous_index = index
+            index = solution.Value(routing.NextVar(index))
+            
+            # Get real distance from matrix since ArcCost is now calculating time
+            prev_node = manager.IndexToNode(previous_index)
+            curr_node = manager.IndexToNode(index)
+            route["total_distance_m"] += distance_matrix[prev_node][curr_node]
+
+        if route["stops"]:  # only include drivers with deliveries
+            route["total_distance_km"] = round(route["total_distance_m"] / 1000, 2)
+            routes.append(route)
+            total_distance_m += route["total_distance_m"]
+
+    print(f"Solved constrained VRP: {len(routes)} routes, {total_distance_m/1000:.1f} km total")
+    return routes
 ```
 
 ### Week 10 — Wire Optimizer into Airflow
@@ -1370,14 +1407,20 @@ from airflow.operators.python import PythonOperator
 from datetime import datetime
 
 def run_optimization(**context):
+    import os, json, sys
     from google.cloud import storage
-    import json, sys
-    sys.path.insert(0, '/path/to/project')
-    from optimization.vrp_constrained import solve_vrp_with_constraints
+    from dotenv import load_dotenv
+    load_dotenv()
+    key_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    if not key_path:
+        raise ValueError("GOOGLE_APPLICATION_CREDENTIALS is not set in the .env file!")
 
-    run_date = context['ds']
-    client   = storage.Client()
-    bucket   = client.bucket("delivery-data-lake-yourname")
+    sys.path.insert(0, '/Users/elhaiys/Desktop/Desktop/vs projects/smart-delivery-route-optimization-platform')
+    from optimization.vrp_constrained import solve_vrp_with_constraints
+    # run_date = context['ds']
+    run_date = "2026-06-23"
+    client   = storage.Client.from_service_account_json(key_path)
+    bucket   = client.bucket("delivery-data-lake")
 
     # Load gold layer data
     orders_blob  = bucket.blob(f"gold/orders_spatial/{run_date}/part-00000.parquet")
@@ -1535,62 +1578,201 @@ WHERE ST_DWithin(
     2000
 );
 ```
+### Spatial SQL Functions Reference
+
+#### 1. Geometry Constructors (Creation)
+| Function | Description |
+| :--- | :--- |
+| `ST_Point(lon, lat)` | Creates a 2D Point geometry from longitude and latitude coordinates. |
+| `ST_GeomFromText('WKT')` | Constructs a Geometry object from a Well-Known Text (WKT) string (e.g., `'POINT(31.2 30.0)'`). |
+| `ST_GeogFromText('WKT')` | Constructs a Geography object (spherical Earth model) from a WKT string. |
+| `ST_MakeLine(geom1, geom2)` | Creates a LineString from Point or LineString geometries. |
+| `ST_MakePolygon(linestring)` | Creates a Polygon formed by a closed LineString. |
+
+#### 2. Geometry Outputs (Conversion)
+| Function | Description |
+| :--- | :--- |
+| `ST_AsText(geom)` | Returns the Well-Known Text (WKT) string representation of a geometry. |
+| `ST_AsGeoJSON(geom)` | Returns the geometry as a GeoJSON string, useful for web mapping APIs. |
+| `ST_AsBinary(geom)` | Returns the Well-Known Binary (WKB) representation of the geometry. |
+
+#### 3. Measurements & Analytics
+| Function | Description |
+| :--- | :--- |
+| `ST_Distance(geom1, geom2)` | Calculates the shortest distance between two geometries. *Note: Units depend on the Spatial Reference System (SRS). Use projected coordinates for meters.* |
+| `ST_Area(geom)` | Returns the 2D surface area of a polygonal geometry. |
+| `ST_Length(geom)` | Returns the 2D length of a linear geometry (LineString or MultiLineString). |
+| `ST_Perimeter(geom)` | Returns the 2D perimeter of a polygonal geometry. |
+| `<->` (Operator) | PostGIS-specific spatial operator for index-accelerated Nearest Neighbor (KNN) distance calculations. |
+
+#### 4. Processing & Transformations
+| Function | Description |
+| :--- | :--- |
+| `ST_Transform(geom, to_srid)` | Reprojects a geometry from its current Coordinate Reference System (CRS) to a new one (e.g., EPSG:4326 to EPSG:32636). |
+| `ST_Buffer(geom, distance)` | Creates a polygon representing all points whose distance from the geometry is less than or equal to the specified distance. |
+| `ST_Centroid(geom)` | Returns the geometric center point of a geometry. |
+| `ST_Intersection(geom1, geom2)` | Returns a geometry representing the shared (overlapping) portion of two geometries. |
+| `ST_Union(geom1, geom2)` | Combines two geometries into a single geometry, dissolving shared boundaries. |
+| `ST_SnapToGrid(geom, size)` | Snaps all vertices of a geometry to a regular grid defined by the given cell size. Useful for data clustering/heatmaps. |
+
+#### 5. Spatial Predicates (Relationships)
+*These functions return a boolean (True/False) and are highly optimized for use in `WHERE` clauses with spatial indexes.*
+
+| Function | Description |
+| :--- | :--- |
+| `ST_Intersects(geom1, geom2)` | Returns TRUE if the two geometries share any portion of space (they overlap or touch). |
+| `ST_Contains(geomA, geomB)` | Returns TRUE if no points of geometry B lie in the exterior of geometry A, and at least one point of the interior of B lies in the interior of A. |
+| `ST_Within(geomA, geomB)` | Returns TRUE if geometry A is completely inside geometry B (the inverse of `ST_Contains`). |
+| `ST_DWithin(geom1, geom2, d)` | Returns TRUE if the geometries are within the specified distance `d` of one another. Much faster than using `ST_Distance(...) <= d`. |
+| `ST_Touches(geom1, geom2)` | Returns TRUE if the geometries have at least one point in common, but their interiors do not intersect. |
+
+#### 6. Aggregations (GROUP BY)
+| Function | Description |
+| :--- | :--- |
+| `ST_Collect(geom)` | Aggregates a set of geometries into a `GeometryCollection` or `MultiGeometry`. (In Apache Sedona, this is often a scalar function, not an aggregate). |
+| `ST_Union_Aggr(geom)` | Aggregates a set of geometries by dissolving their boundaries into a single continuous geometry (Native to Apache Sedona). |
 
 ### Python PostGIS Loader
 ```python
 # storage/postgis_loader.py
 import psycopg2
 import json
+import io
+import os
+import pandas as pd
 from google.cloud import storage
+from dotenv import load_dotenv
+
+load_dotenv()
 
 DB_CONFIG = {
     "dbname":   "delivery_platform",
     "user":     "postgres",
-    "password": "your_password",
+    "password": os.getenv("DB_PASSWORD"), # Update this or use os.getenv("DB_PASSWORD")
     "host":     "localhost",
     "port":     5432,
 }
 
-def load_routes(run_date):
-    gcs = storage.Client()
-    bucket = gcs.bucket("delivery-data-lake-yourname")
-    blob   = bucket.blob(f"gold/routes/{run_date}/routes.json")
+def load_drivers(cur, bucket, run_date):
+    """Load drivers from Bronze JSON to satisfy the Foreign Key constraint."""
+    blob = bucket.blob(f"bronze/drivers/{run_date}/drivers.json")
+    if not blob.exists():
+        print("No drivers found for this date. Skipping driver load.")
+        return
+        
+    drivers = json.loads(blob.download_as_text())
+    
+    for driver in drivers:
+        cur.execute("""
+            INSERT INTO drivers (driver_id, location, home_district, capacity_kg, status)
+            VALUES (%s, ST_GeogFromText(%s), %s, %s, %s)
+            ON CONFLICT (driver_id) DO UPDATE 
+            SET location = EXCLUDED.location,
+                status = EXCLUDED.status,
+                last_updated_at = NOW()
+        """, (
+            driver["driver_id"],
+            f"POINT({driver['lon']} {driver['lat']})",
+            driver.get("district"),
+            driver.get("capacity_kg"),
+            driver.get("status", "available")
+        ))
+    print(f"Loaded/Updated {len(drivers)} drivers.")
+
+def load_orders(cur, bucket, run_date):
+    """Load spatially-enriched orders from Gold Parquet."""
+    prefix = f"gold/orders_spatial/{run_date}/"
+    blobs = list(bucket.list_blobs(prefix=prefix))
+    parquet_blob = next((b for b in blobs if b.name.endswith(".parquet")), None)
+    
+    if not parquet_blob:
+        print("No order parquet files found. Skipping order load.")
+        return
+
+    orders_df = pd.read_parquet(io.BytesIO(parquet_blob.download_as_bytes()))
+    orders = orders_df.to_dict("records")
+    
+    for order in orders:
+        cur.execute("""
+            INSERT INTO orders (order_id, location, district, priority, weight_kg, run_date)
+            VALUES (%s, ST_GeogFromText(%s), %s, %s, %s, %s)
+            ON CONFLICT (order_id) DO NOTHING
+        """, (
+            order["order_id"],
+            f"POINT({order['lon']} {order['lat']})",
+            order.get("district"),
+            order.get("priority"),
+            order.get("weight_kg"),
+            run_date
+        ))
+    print(f"Loaded {len(orders)} orders.")
+
+def load_routes(cur, bucket, run_date):
+    """Load optimized routes from Gold JSON."""
+    blob = bucket.blob(f"gold/routes/{run_date}/routes.json")
+    if not blob.exists():
+        print("No routes found. Skipping route load.")
+        return
+        
     routes = json.loads(blob.download_as_text())
-
-    conn = psycopg2.connect(**DB_CONFIG)
-    cur  = conn.cursor()
-
+        
     for route in routes:
         # Build WKT LineString from stop sequence
-        coords = " ".join(
-            f"{s['lon']} {s['lat']}" for s in route["stops"]
-        )
+        coords = ", ".join(f"{s['lon']} {s['lat']}" for s in route["stops"])
         linestring_wkt = f"LINESTRING({coords})" if len(route["stops"]) > 1 else None
 
         cur.execute("""
             INSERT INTO routes (driver_id, route_geometry, stop_sequence,
                                 total_distance_m, run_date)
-            VALUES (%s,
-                    ST_GeogFromText(%s),
-                    %s::jsonb,
-                    %s,
-                    %s)
+            VALUES (%s, ST_GeogFromText(%s), %s::jsonb, %s, %s)
             ON CONFLICT DO NOTHING
         """, (
             route["driver_id"],
             linestring_wkt,
             json.dumps(route["stops"]),
-            route["total_distance_m"],
+            route.get("total_distance_m"),
             run_date,
         ))
+    print(f"Loaded {len(routes)} routes.")
 
-    # Refresh KPI materialized view
-    cur.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY daily_kpis;")
+def run_postgis_ingestion(run_date):
+    key_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    client = storage.Client.from_service_account_json(key_path)
+    bucket = client.bucket("delivery-data-lake")
 
-    conn.commit()
-    cur.close()
-    conn.close()
-    print(f"Loaded {len(routes)} routes for {run_date}")
+    conn = psycopg2.connect(**DB_CONFIG)
+    cur = conn.cursor()
+
+    try:
+        # 1. Load Drivers FIRST (Satisfies Foreign Keys)
+        load_drivers(cur, bucket, run_date)
+        
+        # 2. Load Orders (Needed for KPIs)
+        load_orders(cur, bucket, run_date)
+        
+        # 3. Load Routes
+        load_routes(cur, bucket, run_date)
+
+        # 4. Refresh KPI materialized view
+        print("Refreshing Materialized View...")
+        cur.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY daily_kpis;")
+
+        conn.commit()
+        print(f"✅ Successfully ingested all PostGIS data for {run_date}")
+        
+    except Exception as e:
+        conn.rollback()
+        print(f"❌ Failed to load data into PostGIS: {e}")
+        raise e
+    finally:
+        cur.close()
+        conn.close()
+
+if __name__ == "__main__":
+    import sys
+    # For local testing: python storage/postgis_loader.py 2026-06-23
+    test_date = sys.argv if len(sys.argv) > 1 else "2026-06-23"
+    run_postgis_ingestion(test_date)
 ```
 
 ### Learning Goals — Phase 4

@@ -6,6 +6,7 @@ from google.cloud import storage
 load_dotenv()
 logger = logging.getLogger(__name__)
 BUCKET_NAME = os.getenv("GCS_BUCKET_NAME")
+
 def get_gcs_client():
     """
     Creates GCS client using service account
