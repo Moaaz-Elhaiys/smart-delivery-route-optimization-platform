@@ -5,9 +5,10 @@ from dotenv import load_dotenv
 from google.cloud import storage
 load_dotenv()
 from config import GCS_BUCKET_NAME, GCS_CREDENTIALS_PATH
+from storage.gcs_client import get_gcs_bucket
+
 
 logger = logging.getLogger(__name__)
-
 
 
 def upload_to_bronze(data, gcs_path):
@@ -16,8 +17,8 @@ def upload_to_bronze(data, gcs_path):
     Example:
     roads/2026-01-01/roads.json
     """
-    client = storage.Client.from_service_account_json(GCS_CREDENTIALS_PATH)
-    bucket = client.bucket(GCS_BUCKET_NAME)
+    bucket = get_gcs_bucket()
+
     blob = bucket.blob(
         f"bronze/{gcs_path}"
     )

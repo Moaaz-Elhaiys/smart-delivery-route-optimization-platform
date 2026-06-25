@@ -5,96 +5,135 @@ import io
 import os
 import pandas as pd
 from google.cloud import storage
-from dotenv import load_dotenv
-from config import DB_CONFIG
-load_dotenv()
-from config import GCS_BUCKET_NAME, GCS_CREDENTIALS_PATH
+from config import DB_CONFIG, GCS_CREDENTIALS_PATH, GCS_BUCKET_NAME
 
+BATCH_SIZE = 500
 
-
-def load_drivers(cur, bucket, run_date):
-    """Load drivers from Bronze JSON to satisfy the Foreign Key constraint."""
+def load_drivers(cur, bucket, run_date: str) -> int:
     blob = bucket.blob(f"bronze/drivers/{run_date}/drivers.json")
     if not blob.exists():
-        print("No drivers found for this date. Skipping driver load.")
-        return
-        
-    drivers = json.loads(blob.download_as_text())
-    
-    for driver in drivers:
-        cur.execute("""
-            INSERT INTO drivers (driver_id, location, home_district, capacity_kg, status)
-            VALUES (%s, ST_GeogFromText(%s), %s, %s, %s)
-            ON CONFLICT (driver_id) DO UPDATE 
-            SET location = EXCLUDED.location,
-                status = EXCLUDED.status,
-                last_updated_at = NOW()
-        """, (
-            driver["driver_id"],
-            f"POINT({driver['lon']} {driver['lat']})",
-            driver.get("district"),
-            driver.get("capacity_kg"),
-            driver.get("status", "available")
-        ))
-    print(f"Loaded/Updated {len(drivers)} drivers.")
+        logger.warning("No drivers found for %s", run_date)
+        return 0
 
-def load_orders(cur, bucket, run_date):
-    """Load spatially-enriched orders from Gold Parquet."""
+    drivers = json.loads(blob.download_as_text())
+
+    # ✅ Use execute_values for batch insert
+    from psycopg2.extras import execute_values
+
+    rows = [
+        (
+            d["driver_id"],
+            f"POINT({d['lon']} {d['lat']})",
+            d.get("district"),
+            d.get("capacity_kg"),
+            d.get("status", "available"),
+        )
+        for d in drivers
+    ]
+
+    execute_values(
+        cur,
+        """
+        INSERT INTO drivers (driver_id, location, home_district, capacity_kg, status)
+        VALUES %s
+        ON CONFLICT (driver_id) DO UPDATE
+        SET location = EXCLUDED.location,
+            status = EXCLUDED.status,
+            last_updated_at = NOW()
+        """,
+        rows,
+        template="(%s, ST_GeogFromText(%s), %s, %s, %s)",
+        page_size=BATCH_SIZE,
+    )
+    logger.info("Loaded/updated %d drivers", len(drivers))
+    return len(drivers)
+
+
+def load_orders(cur, bucket, run_date: str) -> int:
     prefix = f"gold/orders_spatial/{run_date}/"
     blobs = list(bucket.list_blobs(prefix=prefix))
-    parquet_blob = next((b for b in blobs if b.name.endswith(".parquet")), None)
-    
-    if not parquet_blob:
-        print("No order parquet files found. Skipping order load.")
-        return
+    parquet_blobs = [b for b in blobs if b.name.endswith(".parquet")]
 
-    orders_df = pd.read_parquet(io.BytesIO(parquet_blob.download_as_bytes()))
-    orders = orders_df.to_dict("records")
-    
-    for order in orders:
-        cur.execute("""
+    if not parquet_blobs:
+        logger.warning("No order parquet files found for %s", run_date)
+        return 0
+
+    from psycopg2.extras import execute_values
+
+    total_loaded = 0
+    for blob in parquet_blobs:
+        orders_df = pd.read_parquet(io.BytesIO(blob.download_as_bytes()))
+
+        rows = [
+            (
+                o["order_id"],
+                f"POINT({o['lon']} {o['lat']})",
+                o.get("district"),
+                o.get("priority"),
+                o.get("weight_kg"),
+                run_date,
+            )
+            for o in orders_df.to_dict("records")
+        ]
+
+        execute_values(
+            cur,
+            """
             INSERT INTO orders (order_id, location, district, priority, weight_kg, run_date)
-            VALUES (%s, ST_GeogFromText(%s), %s, %s, %s, %s)
+            VALUES %s
             ON CONFLICT (order_id) DO NOTHING
-        """, (
-            order["order_id"],
-            f"POINT({order['lon']} {order['lat']})",
-            order.get("district"),
-            order.get("priority"),
-            order.get("weight_kg"),
-            run_date
-        ))
-    print(f"Loaded {len(orders)} orders.")
+            """,
+            rows,
+            template="(%s, ST_GeogFromText(%s), %s, %s, %s, %s)",
+            page_size=BATCH_SIZE,
+        )
+        total_loaded += len(rows)
 
-def load_routes(cur, bucket, run_date):
-    """Load optimized routes from Gold JSON."""
+    logger.info("Loaded %d orders", total_loaded)
+    return total_loaded
+
+
+def load_routes(cur, bucket, run_date: str) -> int:
     blob = bucket.blob(f"gold/routes/{run_date}/routes.json")
     if not blob.exists():
-        print("No routes found. Skipping route load.")
-        return
-        
+        logger.warning("No routes found for %s", run_date)
+        return 0
+
     routes = json.loads(blob.download_as_text())
-        
+
+    from psycopg2.extras import execute_values
+
+    rows = []
     for route in routes:
-        # Build WKT LineString from stop sequence
         coords = ", ".join(f"{s['lon']} {s['lat']}" for s in route["stops"])
         linestring_wkt = f"LINESTRING({coords})" if len(route["stops"]) > 1 else None
 
-        cur.execute("""
-            INSERT INTO routes (driver_id, route_geometry, stop_sequence,
-                                total_distance_m, run_date)
-            VALUES (%s, ST_GeogFromText(%s), %s::jsonb, %s, %s)
-            ON CONFLICT DO NOTHING
-        """, (
+        rows.append((
             route["driver_id"],
             linestring_wkt,
             json.dumps(route["stops"]),
             route.get("total_distance_m"),
             run_date,
         ))
-    print(f"Loaded {len(routes)} routes.")
 
-def run_postgis_ingestion(run_date):
+    execute_values(
+        cur,
+        """
+        INSERT INTO routes (driver_id, route_geometry, stop_sequence,
+                            total_distance_m, run_date)
+        VALUES %s
+        ON CONFLICT DO NOTHING
+        """,
+        rows,
+        template="(%s, ST_GeogFromText(%s), %s::jsonb, %s, %s)",
+        page_size=BATCH_SIZE,
+    )
+    logger.info("Loaded %d routes", len(routes))
+    return len(routes)
+
+
+def run_postgis_ingestion(run_date: str) -> dict:
+    """Returns a summary dict for Airflow XCom or logging."""
     client = storage.Client.from_service_account_json(GCS_CREDENTIALS_PATH)
     bucket = client.bucket(GCS_BUCKET_NAME)
 
@@ -102,32 +141,34 @@ def run_postgis_ingestion(run_date):
     cur = conn.cursor()
 
     try:
-        # 1. Load Drivers FIRST (Satisfies Foreign Keys)
-        load_drivers(cur, bucket, run_date)
-        
-        # 2. Load Orders (Needed for KPIs)
-        load_orders(cur, bucket, run_date)
-        
-        # 3. Load Routes
-        load_routes(cur, bucket, run_date)
+        n_drivers = load_drivers(cur, bucket, run_date)
+        n_orders  = load_orders(cur, bucket, run_date)
+        n_routes  = load_routes(cur, bucket, run_date)
 
-        # 4. Refresh KPI materialized view
-        print("Refreshing Materialized View...")
+        logger.info("Refreshing materialized view...")
         cur.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY daily_kpis;")
 
         conn.commit()
-        print(f"✅ Successfully ingested all PostGIS data for {run_date}")
-        
-    except Exception as e:
+        summary = {
+            "run_date": run_date,
+            "drivers_loaded": n_drivers,
+            "orders_loaded": n_orders,
+            "routes_loaded": n_routes,
+        }
+        logger.info("✅ PostGIS ingestion complete: %s", summary)
+        return summary
+
+    except Exception:
         conn.rollback()
-        print(f"❌ Failed to load data into PostGIS: {e}")
-        raise e
+        logger.exception("❌ Failed to load data into PostGIS")
+        raise
     finally:
         cur.close()
         conn.close()
 
+
 if __name__ == "__main__":
     import sys
-    # For local testing: python storage/postgis_loader.py 2026-06-23
-    test_date = sys.argv if len(sys.argv) > 1 else "2026-06-23"
-    run_postgis_ingestion(test_date)
+    logging.basicConfig(level=logging.INFO)
+    date = sys.argv[1] if len(sys.argv) > 1 else "2026-06-23"
+    run_postgis_ingestion(date)
