@@ -6,16 +6,11 @@ import os
 import pandas as pd
 from google.cloud import storage
 from dotenv import load_dotenv
-
+from config import DB_CONFIG
 load_dotenv()
+from config import GCS_BUCKET_NAME, GCS_CREDENTIALS_PATH
 
-DB_CONFIG = {
-    "dbname":   "delivery_platform",
-    "user":     "postgres",
-    "password": os.getenv("DB_PASSWORD"), # Update this or use os.getenv("DB_PASSWORD")
-    "host":     "localhost",
-    "port":     5432,
-}
+
 
 def load_drivers(cur, bucket, run_date):
     """Load drivers from Bronze JSON to satisfy the Foreign Key constraint."""
@@ -100,9 +95,8 @@ def load_routes(cur, bucket, run_date):
     print(f"Loaded {len(routes)} routes.")
 
 def run_postgis_ingestion(run_date):
-    key_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-    client = storage.Client.from_service_account_json(key_path)
-    bucket = client.bucket("delivery-data-lake")
+    client = storage.Client.from_service_account_json(GCS_CREDENTIALS_PATH)
+    bucket = client.bucket(GCS_BUCKET_NAME)
 
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()

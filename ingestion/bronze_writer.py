@@ -4,17 +4,11 @@ import logging
 from dotenv import load_dotenv
 from google.cloud import storage
 load_dotenv()
-logger = logging.getLogger(__name__)
-BUCKET_NAME = os.getenv("GCS_BUCKET_NAME")
+from config import GCS_BUCKET_NAME, GCS_CREDENTIALS_PATH
 
-def get_gcs_client():
-    """
-    Creates GCS client using service account
-    path from GOOGLE_APPLICATION_CREDENTIALS
-    """
-    if not BUCKET_NAME:
-        raise ValueError("GCS_BUCKET_NAME missing in .env")
-    return storage.Client()
+logger = logging.getLogger(__name__)
+
+
 
 def upload_to_bronze(data, gcs_path):
     """
@@ -22,8 +16,8 @@ def upload_to_bronze(data, gcs_path):
     Example:
     roads/2026-01-01/roads.json
     """
-    client = get_gcs_client()
-    bucket = client.bucket(BUCKET_NAME)
+    client = storage.Client.from_service_account_json(GCS_CREDENTIALS_PATH)
+    bucket = client.bucket(GCS_BUCKET_NAME)
     blob = bucket.blob(
         f"bronze/{gcs_path}"
     )

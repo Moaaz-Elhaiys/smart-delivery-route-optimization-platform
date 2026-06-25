@@ -15,8 +15,7 @@ def run_optimization(**context):
 
     sys.path.insert(0, '/Users/elhaiys/Desktop/Desktop/vs projects/smart-delivery-route-optimization-platform')
     from optimization.vrp_constrained import solve_vrp_with_constraints
-    # run_date = context['ds']
-    run_date = "2026-06-23"
+    run_date = context['ds']
     client   = storage.Client.from_service_account_json(key_path)
     bucket   = client.bucket("delivery-data-lake")
 

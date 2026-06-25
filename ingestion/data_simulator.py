@@ -3,6 +3,7 @@ import random
 import json
 import uuid
 from datetime import datetime, timedelta
+from config import DEFAULT_ORDER_COUNT , DEFAULT_DRIVER_COUNT
 
 # Cairo districts bounding boxes (simplified)
 DISTRICTS = {
@@ -20,7 +21,7 @@ def random_point_in_district(district_name):
     lon = random.uniform(*d["lon"])
     return lat, lon
 
-def simulate_orders(n=500, date=None):
+def simulate_orders(n=DEFAULT_ORDER_COUNT, date=None):
     date = date or datetime.utcnow().date()
     orders = []
     for _ in range(n):
@@ -43,7 +44,7 @@ def simulate_orders(n=500, date=None):
         })
     return orders
 
-def simulate_drivers(n=20):
+def simulate_drivers(n=DEFAULT_DRIVER_COUNT):
     drivers = []
     for i in range(n):
         district = random.choice(list(DISTRICTS.keys()))

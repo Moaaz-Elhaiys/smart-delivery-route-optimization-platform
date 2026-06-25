@@ -46,10 +46,10 @@ def process_roads(spark, run_date):
         ).otherwise(
             # Default speeds by road type (Cairo approximations)
             F.when(F.col("road_type") == "motorway", 100)
-             .when(F.col("road_type") == "trunk", 80)
-             .when(F.col("road_type") == "primary", 60)
-             .when(F.col("road_type") == "secondary", 50)
-             .otherwise(30)
+                .when(F.col("road_type") == "trunk", 80)
+                .when(F.col("road_type") == "primary", 60)
+                .when(F.col("road_type") == "secondary", 50)
+                .otherwise(30)
         )
     )
 
