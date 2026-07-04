@@ -35,6 +35,20 @@ def solve_vrp(orders, drivers, max_route_distance_m=50_000):
     drivers: list of dicts with lat, lon, driver_id, capacity_kg
     Returns: list of routes (one per driver)
     """
+    # ── Input validation ──
+    if not orders:
+        raise ValueError("No orders provided to VRP solver")
+    if not drivers:
+        raise ValueError("No drivers provided to VRP solver")
+    if len(drivers) > len(orders):
+        logger.warning(
+            "More drivers (%d) than orders (%d) — some drivers will be idle",
+            len(drivers), len(orders)
+        )
+
+    for o in orders:
+        if not all(k in o for k in ("lat", "lon", "order_id")):
+            raise ValueError(f"Order missing required fields: {o}")
     # Node 0 is the depot (city center / warehouse)
     depot_lat, depot_lon = 30.0444, 31.2357  # Cairo center
     depot = {"lat": depot_lat, "lon": depot_lon, "order_id": "DEPOT"}

@@ -4,6 +4,8 @@ import json
 import uuid
 from datetime import datetime, timedelta
 from config import DEFAULT_ORDER_COUNT , DEFAULT_DRIVER_COUNT
+import random
+from typing import Optional
 
 # Cairo districts bounding boxes (simplified)
 DISTRICTS = {
@@ -21,7 +23,13 @@ def random_point_in_district(district_name):
     lon = random.uniform(*d["lon"])
     return lat, lon
 
-def simulate_orders(n=DEFAULT_ORDER_COUNT, date=None):
+def simulate_orders(n: int = 500,date=None,seed: Optional[int] = None,) -> list[dict]:
+    """Generate simulated delivery orders.
+    Args:
+        seed: If provided, results are reproducible (for testing).
+    """
+    if seed is not None:
+        random.seed(seed)
     date = date or datetime.utcnow().date()
     orders = []
     for _ in range(n):

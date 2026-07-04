@@ -1,82 +1,65 @@
-# ingestion/overpass_client.py
+# ingestion/overpass_client.py — fixed and improved
 import requests
 import time
-import json
 import logging
-from pathlib import Path
+from config import CAIRO_BBOX
 
 logger = logging.getLogger(__name__)
-
-# Cairo bounding box: south, west, north, east
-CAIRO_BBOX = (29.9, 31.1, 30.2, 31.5)
 
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 
 ROAD_QUERY = """
 [out:json][timeout:90][bbox:{south},{west},{north},{east}];
 (
-  way["highway"~"motorway|trunk|primary|secondary|residential|service"];
+    way["highway"~"motorway|trunk|primary|secondary|residential|service"];
 );
 out body geom;
 """.strip()
 
-def fetch_roads(bbox=CAIRO_BBOX, max_retries=3, backoff_seconds=10):
+
+def fetch_roads(
+    bbox: tuple = CAIRO_BBOX,
+    max_retries: int = 3,
+    backoff_seconds: float = 10,
+) -> dict:
+    """Fetch road network from Overpass API with exponential backoff."""
     south, west, north, east = bbox
     query = ROAD_QUERY.format(south=south, west=west, north=north, east=east)
 
     for attempt in range(1, max_retries + 1):
         try:
-            logger.info(f"Fetching roads, attempt {attempt}/{max_retries}")
+            logger.info("Fetching roads, attempt %d/%d", attempt, max_retries)
             response = requests.post(
                 OVERPASS_URL,
                 data={"data": query},
                 headers={
                     "User-Agent": "Smart-Delivery-Route-Optimization-Platform/1.0"
                 },
-                timeout=120, # Client-side timeout
+                timeout=120,
             )
             response.raise_for_status()
             data = response.json()
-            logger.info(f"Fetched {len(data.get('elements', []))} road elements")
+            n_elements = len(data.get("elements", []))
+            logger.info("Fetched %d road elements", n_elements)
             return data
 
         except requests.exceptions.HTTPError as e:
-            # Retry on Rate Limits (429) OR Server Errors (5xx like 504, 502, 500)
-            if response.status_code == 429 or response.status_code >= 500:
-                wait = backoff_seconds * (2 ** attempt)
-                logger.warning(f"HTTP {response.status_code} encountered. Waiting {wait}s before retry.")
-                time.sleep(wait)
-            else:
-                # If it's a 400 Bad Request, retrying won't fix your query. Fail immediately.
-                logger.error(f"Fatal HTTP Error {response.status_code}: {response.text}")
+            if response.status_code != 429:
                 raise
-
-        except requests.exceptions.Timeout:
-            # Handles client-side timeouts
             wait = backoff_seconds * (2 ** attempt)
-            logger.warning(f"Client timeout on attempt {attempt}. Waiting {wait}s before retry.")
+            logger.warning("Rate limited (429). Waiting %.0fs before retry.", wait)
             time.sleep(wait)
 
-        except requests.exceptions.RequestException as e:
-            # Handles dropped connections, DNS failures, etc.
-            logger.warning(f"Connection error on attempt {attempt}: {e}")
+        except requests.exceptions.Timeout:
+            logger.warning("Timeout on attempt %d/%d", attempt, max_retries)
+            if attempt == max_retries:
+                raise
             time.sleep(backoff_seconds)
 
-    # If the loop finishes without returning, we are out of retries
-    raise Exception(f"Failed to fetch roads after {max_retries} attempts.")
+        except requests.exceptions.ConnectionError as e:
+            logger.warning("Connection error on attempt %d: %s", attempt, e)
+            if attempt == max_retries:
+                raise
+            time.sleep(backoff_seconds * (2 ** attempt))
 
-# terminal test
-if __name__ == "__main__":
-    import json
-    import logging
-
-    logging.basicConfig(level=logging.INFO)
-
-    roads = fetch_roads()
-
-    print(f"Total roads: {len(roads['elements'])}")
-
-    with open("roads_test.json", "w") as f:
-        json.dump(roads, f, indent=2)
-
-    print("Done")
+    raise RuntimeError(f"Max retries ({max_retries}) exceeded fetching OSM data")

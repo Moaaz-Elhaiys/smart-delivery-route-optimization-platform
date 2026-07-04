@@ -199,34 +199,34 @@ jobs:
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        MAC M1 AIR (8GB)                             │
 │                                                                     │
-│  ┌─────────────┐    ┌──────────────┐    ┌───────────────────────┐  │
-│  │   Airflow   │───▶│ OSM Ingestion│───▶│  GCS Bronze Layer     │  │
-│  │ (scheduler) │    │   (Python)   │    │  raw JSON / OSM data  │  │
-│  └──────┬──────┘    └──────────────┘    └───────────────────────┘  │
+│  ┌─────────────┐    ┌──────────────┐    ┌───────────────────────┐   │
+│  │   Airflow   │───▶│ OSM Ingestion│───▶│  GCS Bronze Layer     │   │
+│  │ (scheduler) │    │   (Python)   │    │  raw JSON / OSM data  │   │
+│  └──────┬──────┘    └──────────────┘    └───────────────────────┘   │
 │         │ SSHOperator                                               │
-│         │                                         ▲                 │
-│  ┌──────▼──────┐    ┌──────────────┐    ┌────────┴──────────────┐  │
-│  │  OR-Tools   │◀───│  GCS Gold    │    │   GCS Silver Layer    │  │
-│  │ (optimizer) │    │   Layer      │    │   cleaned Parquet     │  │
-│  └──────┬──────┘    └──────────────┘    └───────────────────────┘  │
-│         │                                         ▲                 │
-│  ┌──────▼──────┐    ┌──────────────┐             │                 │
-│  │   PostGIS   │    │  Streamlit   │             │ SSH / submit    │
-│  │ (results)   │    │  Dashboard   │             │                 │
-│  └─────────────┘    └──────────────┘             │                 │
-└─────────────────────────────────────────────────┼───────────────────┘
-                                                  │
-┌─────────────────────────────────────────────────▼───────────────────┐
+│         │                                        ▲                  │
+│  ┌──────▼──────┐    ┌──────────────┐    ┌────────┴──────────────┐   │
+│  │  OR-Tools   │◀───│  GCS Gold    │    │   GCS Silver Layer    │   │
+│  │ (optimizer) │    │   Layer      │    │   cleaned Parquet     │   │
+│  └──────┬──────┘    └──────────────┘    └───────────────────────┘   │
+│         │                                        ▲                  │
+│  ┌──────▼──────┐    ┌──────────────┐             │                  │
+│  │   PostGIS   │    │  Streamlit   │             │ SSH / submit     │
+│  │ (results)   │    │  Dashboard   │             │                  │
+│  └─────────────┘    └──────────────┘             │                  │
+└──────────────────────────────────────────────────┼──────────────────┘
+                                                   │
+┌──────────────────────────────────────────────────▼──────────────────┐
 │                      WINDOWS LAPTOP (16GB)                          │
 │                                                                     │
 │  ┌──────────────────────────────────────────────────────────────┐   │
 │  │                    Docker Compose                            │   │
-│  │  ┌─────────────────┐      ┌──────────────────────────────┐  │   │
-│  │  │  Spark Master   │      │       Spark Worker           │  │   │
-│  │  │  (2GB)          │      │  + Apache Sedona (6GB)       │  │   │
-│  │  └────────┬────────┘      └──────────────────────────────┘  │   │
+│  │  ┌─────────────────┐      ┌──────────────────────────────┐   │   │
+│  │  │  Spark Master   │      │       Spark Worker           │   │   │
+│  │  │  (2GB)          │      │  + Apache Sedona (6GB)       │   │   │
+│  │  └────────┬────────┘      └──────────────────────────────┘   │   │
 │  └───────────┼──────────────────────────────────────────────────┘   │
-│              │ reads/writes GCS via service account                  │
+│              │ reads/writes GCS via service account                 │
 └──────────────┼──────────────────────────────────────────────────────┘
                │
         ┌──────▼───────┐
@@ -288,6 +288,7 @@ uv add \
 uv add \
     apache-airflow-providers-ssh \
     psycopg2-binary \
+    pydantic \
     ortools \
     streamlit \
     folium \
@@ -301,6 +302,12 @@ uv add \
     pytest \
     python-dotenv
 ```
+
+# Initialize the DB using uv run
+#### Initialize Airflow
+```bash
+uv run airflow db init
+```
 #### Add SSH connection to the airflow (Mac)
 ```bash
 uv run airflow connections add 'windows_spark' \
@@ -311,12 +318,10 @@ uv run airflow connections add 'windows_spark' \
     --conn-port 22
 ```
 
-#### Initialize Airflow
 ```bash
 export AIRFLOW_HOME=~/projects/delivery-platform/airflow
+export PYTHONPATH="${AIRFLOW_HOME}:$PYTHONPATH"
 
-# Initialize the DB using uv run
-uv run airflow db init
 
 # Create the user
 uv run airflow users create \
@@ -327,13 +332,7 @@ uv run airflow users create \
   --role Admin \
   --email admin@local.com
 
-# Add SSH connection to Airflow
-uv run airflow connections add 'windows_spark' \
-    --conn-type 'ssh' \
-    --conn-host '192.168.100.0' \
-    --conn-login 'your_windows_username' \
-    --conn-password 'your_windows_password' \
-    --conn-port 22
+
 
 # Start the components (in separate terminals)
 uv run airflow webserver --port 8080
@@ -680,104 +679,61 @@ def count_bronze_records(gcs_path):
 ### Schema validation
 ```python
 # ingestion/schemas.py
+from __future__ import annotations
+from typing import Literal
+from pydantic import BaseModel, Field, field_validator
 from datetime import datetime
-# -------------------------
-# Required fields
-# -------------------------
-ORDER_REQUIRED_FIELDS = {
-    "order_id",
-    "lat",
-    "lon",
-    "district",
-    "priority",
-    "weight_kg",
-    "created_at",
-    "delivery_window_start",
-    "delivery_window_end",
-}
-DRIVER_REQUIRED_FIELDS = {
-    "driver_id",
-    "lat",
-    "lon",
-    "capacity_kg",
-    "status",
-    "district",
-}
-ROAD_REQUIRED_FIELDS = {
-    "type",
-    "id",
-    "geometry",
-}
-# -------------------------
-# Generic validation
-# -------------------------
-def validate_required_fields(record, required_fields):
-    """
-    Checks if one dictionary has all required fields
-    """
-    if missing := required_fields - record.keys():
-        raise ValueError(
-            f"Missing fields: {missing}"
-        )
-    return True
-# -------------------------
-# Orders validation
-# -------------------------
-def validate_orders(orders):
-    """
-    Validate simulated orders before Bronze upload
-    """
-    if not isinstance(orders, list):
-        raise TypeError("Orders must be a list")
-    for order in orders:
-        validate_required_fields(order,ORDER_REQUIRED_FIELDS)
 
-        if not isinstance(order["lat"], float):
-            raise TypeError("lat must be float")
-        if not isinstance(order["lon"], float):
-            raise TypeError("lon must be float")
-        if order["priority"] not in ["high","medium","low"]:
-            raise ValueError("Invalid priority")
-    return True
-# -------------------------
-# Drivers validation
-# -------------------------
-def validate_drivers(drivers):
-    if not isinstance(drivers, list):
-        raise TypeError("Drivers must be list")
-    for driver in drivers:
-        validate_required_fields(driver,DRIVER_REQUIRED_FIELDS)
-        if driver["status"] not in ["available","busy","offline"]:
-            raise ValueError("Invalid driver status")
-    return True
-# -------------------------
-# OSM roads validation
-# -------------------------
-def validate_roads(osm_data):
-    """
-    Validate Overpass response
-    """
+# ── Order Contract ──
+class Order(BaseModel):
+    order_id: str
+    lat: float = Field(ge=29.5, le=30.5, description="Latitude within Cairo bbox")
+    lon: float = Field(ge=31.0, le=31.8, description="Longitude within Cairo bbox")
+    district: str
+    priority: Literal["high", "medium", "low"]
+    weight_kg: float = Field(gt=0, le=100)
+    created_at: datetime
+    delivery_window_start: str
+    delivery_window_end: str
+
+    @field_validator("delivery_window_start", "delivery_window_end")
+    @classmethod
+    def validate_time_format(cls, v: str) -> str:
+        try:
+            datetime.strptime(v, "%H:%M")
+        except ValueError:
+            raise ValueError(f"Invalid time format: {v}. Expected HH:MM")
+        return v
+
+# ── Driver Contract ──
+class Driver(BaseModel):
+    driver_id: str
+    lat: float = Field(ge=29.5, le=30.5)
+    lon: float = Field(ge=31.0, le=31.8)
+    capacity_kg: float = Field(gt=0)
+    status: Literal["available", "busy", "offline"]
+    district: str
+
+# ── Bulk validators ──
+def validate_orders(orders: list[dict]) -> list[Order]:
+    """Validate all orders. Raises ValidationError with details on failure."""
+    return [Order(**o) for o in orders]
+
+def validate_drivers(drivers: list[dict]) -> list[Driver]:
+    return [Driver(**d) for d in drivers]
+
+def validate_roads(osm_data: dict) -> dict:
+    """Lightweight OSM validation — Pydantic is overkill for the full OSM schema."""
     if not isinstance(osm_data, dict):
         raise TypeError("OSM response must be dict")
     if "elements" not in osm_data:
-        raise ValueError("Missing elements from OSM response")
-    roads = osm_data["elements"]
-    if len(roads) == 0:
-        raise ValueError("No roads received")
-    for road in roads[:10]:
-        validate_required_fields(road,ROAD_REQUIRED_FIELDS)
-    return True
-# -------------------------
-# Test locally
-# -------------------------
-if __name__ == "__main__":
-
-    from data_simulator import (simulate_orders,simulate_drivers)
-    orders = simulate_orders(10)
-    drivers = simulate_drivers(5)
-    validate_orders(orders)
-    validate_drivers(drivers)
-    print("Schema validation passed")
+        raise ValueError("Missing 'elements' from OSM response")
+    if len(osm_data["elements"]) == 0:
+        raise ValueError("No road elements received")
+    for road in osm_data["elements"][:20]:  # sample check
+        if "id" not in road:
+            raise ValueError(f"Road element missing 'id': {road}")
+    return osm_data
 ```
 ### Airflow Ingestion DAG
 ```python

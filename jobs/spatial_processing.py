@@ -1,32 +1,17 @@
 # jobs/spatial_processing.py (runs on Windows Spark cluster)
-from pyspark.sql import SparkSession
+import sys
 from pyspark.sql import functions as F
-from sedona.register import SedonaRegistrator
-from sedona.utils import SedonaKryoRegistrator, KryoSerializer
-
-def create_sedona_spark():
-    return SparkSession.builder \
-        .appName("SpatialProcessing") \
-        .config("spark.serializer", KryoSerializer.getName) \
-        .config("spark.kryo.registrator", SedonaKryoRegistrator.getName) \
-        .config("spark.hadoop.google.cloud.auth.service.account.json.keyfile",
-                "/opt/bitnami/spark/conf/gcs-key.json") \
-        .config("spark.hadoop.fs.gs.impl",
-                "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem") \
-        .getOrCreate()
+from spark_utils import create_spark_session
 
 def run_spatial_jobs(spark, run_date):
-    SedonaRegistrator.registerAll(spark)
-    # --- Load silver data ---
     orders_path = f"gs://delivery-data-lake/silver/orders/{run_date}/"
     orders = spark.read.parquet(orders_path)
-    # --- Create geometry column from lat/lon ---
-    # IMPORTANT: ST_Point takes (longitude, latitude) — not (lat, lon)
     orders = orders.withColumn(
         "geometry",
         F.expr("ST_Point(CAST(lon AS DECIMAL(24,20)), CAST(lat AS DECIMAL(24,20)))")
     )
     orders.createOrReplaceTempView("orders")
+    
     # --- LEARNING EXERCISE 1: Distance between every order and city center ---
     city_center_lon = 31.2357
     city_center_lat = 30.0444
@@ -76,16 +61,13 @@ def run_spatial_jobs(spark, run_date):
     # --- Write Gold layer ---
     gold_path = f"gs://delivery-data-lake/gold/orders_spatial/{run_date}/"
     orders_with_distance.write.mode("overwrite").parquet(gold_path)
-    hotspots.write.mode("overwrite").parquet(
-        f"gs://delivery-data-lake/gold/hotspots/{run_date}/"
-    )
+    hotspots.write.mode("overwrite").parquet(f"gs://delivery-data-lake/gold/hotspots/{run_date}/")
 
     print("Spatial processing complete")
 
 if __name__ == "__main__":
-    import sys
     run_date = sys.argv[1]
-    spark = create_sedona_spark()
-    spark.sparkContext.setLogLevel("WARN")
+    # Use the shared utility to create the session, ensuring Sedona is enabled
+    spark = create_spark_session(app_name="SpatialProcessing", sedona=True)
     run_spatial_jobs(spark, run_date)
     spark.stop()

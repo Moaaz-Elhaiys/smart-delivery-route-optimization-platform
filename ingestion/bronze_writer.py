@@ -1,15 +1,9 @@
 import os
 import json
 import logging
-from dotenv import load_dotenv
-from google.cloud import storage
-load_dotenv()
-from config import GCS_BUCKET_NAME, GCS_CREDENTIALS_PATH
 from storage.gcs_client import get_gcs_bucket
-
-
+س
 logger = logging.getLogger(__name__)
-
 
 def upload_to_bronze(data, gcs_path):
     """

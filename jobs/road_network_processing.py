@@ -1,23 +1,9 @@
-# jobs/road_network_processing.py (Windows Spark)
-from pyspark.sql import SparkSession
+# jobs/road_network_processing.py (runs on Windows Spark cluster)
+import sys
 from pyspark.sql import functions as F
-from sedona.register import SedonaRegistrator
-from sedona.utils import SedonaKryoRegistrator, KryoSerializer
-
-def create_spark():
-    return SparkSession.builder \
-        .appName("RoadNetworkProcessing") \
-        .config("spark.serializer", KryoSerializer.getName) \
-        .config("spark.kryo.registrator", SedonaKryoRegistrator.getName) \
-        .config("spark.hadoop.google.cloud.auth.service.account.json.keyfile",
-                "/opt/bitnami/spark/conf/gcs-key.json") \
-        .config("spark.hadoop.fs.gs.impl",
-                "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem") \
-        .getOrCreate()
+from spark_utils import create_spark_session
 
 def process_roads(spark, run_date):
-    SedonaRegistrator.registerAll(spark)
-
     raw_path = f"gs://delivery-data-lake/bronze/roads/{run_date}/"
     roads_raw = spark.read.option("multiline", "true").json(raw_path)
 
@@ -58,9 +44,7 @@ def process_roads(spark, run_date):
     print(f"Roads written: {roads.count()} segments")
 
 if __name__ == "__main__":
-    import sys
     run_date = sys.argv[1]
-    spark = create_spark()
-    spark.sparkContext.setLogLevel("WARN")
+    spark = create_spark_session(app_name="RoadNetworkProcessing", sedona=True)
     process_roads(spark, run_date)
     spark.stop()
