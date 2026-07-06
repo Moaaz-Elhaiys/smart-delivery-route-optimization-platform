@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 
 ROAD_QUERY = """
-[out:json][timeout:90][bbox:{south},{west},{north},{east}];
+[out:json][timeout:300][bbox:{south},{west},{north},{east}];
 (
     way["highway"~"motorway|trunk|primary|secondary|residential|service"];
 );
@@ -35,7 +35,7 @@ def fetch_roads(
                 headers={
                     "User-Agent": "Smart-Delivery-Route-Optimization-Platform/1.0"
                 },
-                timeout=120,
+                timeout=350,
             )
             response.raise_for_status()
             data = response.json()

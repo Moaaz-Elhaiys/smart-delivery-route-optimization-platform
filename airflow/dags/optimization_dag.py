@@ -6,26 +6,18 @@ from datetime import datetime
 
 def run_optimization(**context):
     import os, json, sys
-    from google.cloud import storage
-    from dotenv import load_dotenv
-    load_dotenv()
-    key_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-    if not key_path:
-        raise ValueError("GOOGLE_APPLICATION_CREDENTIALS is not set in the .env file!")
-
-    sys.path.insert(0, '/Users/elhaiys/Desktop/Desktop/vs projects/smart-delivery-route-optimization-platform')
+    from storage.gcs_client import get_gcs_bucket
+    from config import GCS_BUCKET_NAME
     from optimization.vrp_constrained import solve_vrp_with_constraints
     run_date = context['ds']
-    client   = storage.Client.from_service_account_json(key_path)
-    bucket   = client.bucket("delivery-data-lake")
-
+    bucket = get_gcs_bucket()
     # Load gold layer data
-    orders_blob  = bucket.blob(f"gold/orders_spatial/{run_date}/part-00000-b1cc003a-338c-45a5-93cf-39a5312c4e29-c000.snappy.parquet")
+    gcs_orders_path  = f"gs://{GCS_BUCKET_NAME}/gold/orders_spatial/{run_date}/"
     drivers_blob = bucket.blob(f"bronze/drivers/{run_date}/drivers.json")
 
     # (In practice, read parquet with pandas or pyarrow)
     import pandas as pd, io
-    orders_df  = pd.read_parquet(io.BytesIO(orders_blob.download_as_bytes()))
+    orders_df  = pd.read_parquet(gcs_orders_path)
     drivers    = json.loads(drivers_blob.download_as_text())
 
     orders = orders_df.to_dict("records")

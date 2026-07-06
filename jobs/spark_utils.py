@@ -2,7 +2,7 @@
 from pyspark.sql import SparkSession
 from sedona.register import SedonaRegistrator
 from sedona.utils import SedonaKryoRegistrator, KryoSerializer
-from config import GCS_BUCKET_NAME, GCS_CREDENTIALS_PATH
+from config import GCS_CREDENTIALS_PATH
 
 
 def create_spark_session(

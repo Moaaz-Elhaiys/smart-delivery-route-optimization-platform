@@ -2,10 +2,10 @@ import os
 import json
 import logging
 from storage.gcs_client import get_gcs_bucket
-س
 logger = logging.getLogger(__name__)
+from config import GCS_BUCKET_NAME
 
-def upload_to_bronze(data, gcs_path):
+def upload_to_bronze(data, gcs_path, metadata=None):
     """
     Upload raw JSON data to bronze layer
     Example:
@@ -18,14 +18,13 @@ def upload_to_bronze(data, gcs_path):
     )
     json_data = json.dumps( data,indent=2)
     blob.upload_from_string(json_data,content_type="application/json")
-    logger.info(f"Uploaded gs://{BUCKET_NAME}/bronze/{gcs_path}")
+    logger.info(f"Uploaded gs://{GCS_BUCKET_NAME}/bronze/{gcs_path}")
 
 def download_from_bronze(gcs_path):
     """
     Download JSON from bronze
     """
-    client = get_gcs_client()
-    bucket = client.bucket(BUCKET_NAME)
+    bucket = get_gcs_bucket()
     blob = bucket.blob(
         f"bronze/{gcs_path}"
     )

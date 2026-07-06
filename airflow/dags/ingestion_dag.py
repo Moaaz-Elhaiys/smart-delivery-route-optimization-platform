@@ -3,6 +3,8 @@ from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.operators.empty import EmptyOperator
 from datetime import datetime, timedelta
+import logging
+
 
 # Default args with retry logic
 default_args = {
@@ -10,7 +12,7 @@ default_args = {
     "depends_on_past": False,
     "retries": 2,
     "retry_delay": timedelta(minutes=5),
-    "email_on_failure": False,
+    "email_on_failure": True,
 }
 
 def ingest_roads(**context):
