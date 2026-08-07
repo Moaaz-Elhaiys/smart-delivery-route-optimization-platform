@@ -126,16 +126,19 @@ You will use **three free-tier cloud services**, each doing something the local 
 # 3. Create bucket: delivery-data-lake-yourname
 # 4. Download service account key JSON
 
-# Install on both machines
-pip install google-cloud-storage
-
-# Set credentials
-export GOOGLE_APPLICATION_CREDENTIALS="/path/to/key.json"
-
-# In Python
+# storage/gcs_client.py
+import functools
 from google.cloud import storage
-client = storage.Client()
-bucket = client.bucket("delivery-data-lake-yourname")
+from config import GCS_BUCKET_NAME, GCS_CREDENTIALS_PATH
+
+@functools.lru_cache(maxsize=1)
+def get_gcs_client() -> storage.Client:
+    """Singleton GCS client — reuse across the entire process."""
+    return storage.Client.from_service_account_json(GCS_CREDENTIALS_PATH)
+
+@functools.lru_cache(maxsize=1)
+def get_gcs_bucket() -> storage.Bucket:
+    return get_gcs_client().bucket(GCS_BUCKET_NAME)
 ```
 
 **How it fits in your pipeline:**
@@ -289,6 +292,8 @@ uv add \
     apache-airflow-providers-ssh \
     psycopg2-binary \
     pydantic \
+    gcsfs \
+    pyarrow \
     ortools \
     streamlit \
     folium \
@@ -319,10 +324,6 @@ uv run airflow connections add 'windows_spark' \
 ```
 
 ```bash
-export AIRFLOW_HOME=~/projects/delivery-platform/airflow
-export PYTHONPATH="${AIRFLOW_HOME}:$PYTHONPATH"
-
-
 # Create the user
 uv run airflow users create \
   --username admin \
@@ -333,11 +334,17 @@ uv run airflow users create \
   --email admin@local.com
 
 
+export AIRFLOW_HOME=~/projects/delivery-platform/airflow
+export PYTHONPATH="${AIRFLOW_HOME}:$PYTHONPATH"
+
+kill -9 $(lsof -i :8080)
+kill -9 $(lsof -i :8793)
+
+
 
 # Start the components (in separate terminals)
 uv run airflow webserver --port 8080
 uv run airflow scheduler
-
 ```
 
 ---
@@ -444,7 +451,7 @@ from airflow.providers.ssh.operators.ssh import SSHOperator
 from datetime import datetime
 
 with DAG(
-    dag_id='test_ssh_connection',
+    dag_id='test_ssh_connection',  # Updated to reflect the test purpose
     start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
@@ -480,6 +487,7 @@ Understand **why** this architecture splits work across machines. Read the Airfl
 
 ```
 ingestion/
+  __init__.py
   overpass_client.py     # OSM road network fetcher with retry logic
   data_simulator.py      # Generates realistic driver/order data
   bronze_writer.py       # Uploads raw data to GCS bronze/
@@ -492,71 +500,71 @@ airflow/dags/
 ### Overpass API Client with Retry Logic
 ```python
 # ingestion/overpass_client.py
+# ingestion/overpass_client.py — fixed and improved
 import requests
 import time
-import json
 import logging
-from pathlib import Path
+from config import CAIRO_BBOX
 
 logger = logging.getLogger(__name__)
-
-# Cairo bounding box: south, west, north, east
-CAIRO_BBOX = (29.9, 31.1, 30.2, 31.5)
 
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 
 ROAD_QUERY = """
-[out:json][timeout:90][bbox:{south},{west},{north},{east}];
+[out:json][timeout:300][bbox:{south},{west},{north},{east}];
 (
-  way["highway"~"motorway|trunk|primary|secondary|residential|service"];
+    way["highway"~"motorway|trunk|primary|secondary|residential|service"];
 );
 out body geom;
 """.strip()
-def fetch_roads(bbox=CAIRO_BBOX, max_retries=3, backoff_seconds=10):
+
+
+def fetch_roads(
+    bbox: tuple = CAIRO_BBOX,
+    max_retries: int = 3,
+    backoff_seconds: float = 10,
+) -> dict:
+    """Fetch road network from Overpass API with exponential backoff."""
     south, west, north, east = bbox
     query = ROAD_QUERY.format(south=south, west=west, north=north, east=east)
 
     for attempt in range(1, max_retries + 1):
         try:
-                        logger.info(f"Fetching roads, attempt {attempt}")
-                        response = requests.post(
-                            OVERPASS_URL,
-                            data={"data": query},
-                            headers={
-                                "User-Agent": "Smart-Delivery-Route-Optimization-Platform/1.0"
-                            },
-                            timeout=120,
+            logger.info("Fetching roads, attempt %d/%d", attempt, max_retries)
+            response = requests.post(
+                OVERPASS_URL,
+                data={"data": query},
+                headers={
+                    "User-Agent": "Smart-Delivery-Route-Optimization-Platform/1.0"
+                },
+                timeout=350,
             )
-                        response.raise_for_status()
-                        data = response.json()
-                        logger.info(f"Fetched {len(data.get('elements', []))} road elements")
-                        return data
+            response.raise_for_status()
+            data = response.json()
+            n_elements = len(data.get("elements", []))
+            logger.info("Fetched %d road elements", n_elements)
+            return data
+
         except requests.exceptions.HTTPError as e:
             if response.status_code != 429:
                 raise
             wait = backoff_seconds * (2 ** attempt)
-            logger.warning(f"Rate limited. Waiting {wait}s before retry.")
+            logger.warning("Rate limited (429). Waiting %.0fs before retry.", wait)
             time.sleep(wait)
+
         except requests.exceptions.Timeout:
-            logger.warning(f"Timeout on attempt {attempt}. Retrying...")
+            logger.warning("Timeout on attempt %d/%d", attempt, max_retries)
+            if attempt == max_retries:
+                raise
             time.sleep(backoff_seconds)
 
-    raise RuntimeError("Max retries exceeded fetching OSM data")
-# terminal test
-if __name__ == "__main__":
-    import json
-    import logging
+        except requests.exceptions.ConnectionError as e:
+            logger.warning("Connection error on attempt %d: %s", attempt, e)
+            if attempt == max_retries:
+                raise
+            time.sleep(backoff_seconds * (2 ** attempt))
 
-    logging.basicConfig(level=logging.INFO)
-
-    roads = fetch_roads()
-
-    print(f"Total roads: {len(roads['elements'])}")
-
-    with open("roads_test.json", "w") as f:
-        json.dump(roads, f, indent=2)
-
-    print("Done")
+    raise RuntimeError(f"Max retries ({max_retries}) exceeded fetching OSM data")
 ```
 
 ### Data Simulator
@@ -566,6 +574,9 @@ import random
 import json
 import uuid
 from datetime import datetime, timedelta
+from config import DEFAULT_ORDER_COUNT , DEFAULT_DRIVER_COUNT
+import random
+from typing import Optional
 
 # Cairo districts bounding boxes (simplified)
 DISTRICTS = {
@@ -583,7 +594,13 @@ def random_point_in_district(district_name):
     lon = random.uniform(*d["lon"])
     return lat, lon
 
-def simulate_orders(n=500, date=None):
+def simulate_orders(n: int = 500,date=None,seed: Optional[int] = None,) -> list[dict]:
+    """Generate simulated delivery orders.
+    Args:
+        seed: If provided, results are reproducible (for testing).
+    """
+    if seed is not None:
+        random.seed(seed)
     date = date or datetime.utcnow().date()
     orders = []
     for _ in range(n):
@@ -606,7 +623,7 @@ def simulate_orders(n=500, date=None):
         })
     return orders
 
-def simulate_drivers(n=20):
+def simulate_drivers(n=DEFAULT_DRIVER_COUNT):
     drivers = []
     for i in range(n):
         district = random.choice(list(DISTRICTS.keys()))
@@ -620,61 +637,26 @@ def simulate_drivers(n=20):
             "district": district,
         })
     return drivers
-```
-### Write data to GCS bucket 
-```python
-import os
-import json
-import logging
-from dotenv import load_dotenv
-from google.cloud import storage
-load_dotenv()
-logger = logging.getLogger(__name__)
-BUCKET_NAME = os.getenv("GCS_BUCKET_NAME")
-def get_gcs_client():
-    """
-    Creates GCS client using service account
-    path from GOOGLE_APPLICATION_CREDENTIALS
-    """
-    if not BUCKET_NAME:
-        raise ValueError("GCS_BUCKET_NAME missing in .env")
-    return storage.Client()
 
-def upload_to_bronze(data, gcs_path):
-    """
-    Upload raw JSON data to bronze layer
-    Example:
-    roads/2026-01-01/roads.json
-    """
-    client = get_gcs_client()
-    bucket = client.bucket(BUCKET_NAME)
-    blob = bucket.blob(
-        f"bronze/{gcs_path}"
-    )
-    json_data = json.dumps( data,indent=2)
-    blob.upload_from_string(json_data,content_type="application/json")
-    logger.info(f"Uploaded gs://{BUCKET_NAME}/bronze/{gcs_path}")
+# terminal test
+if __name__ == "__main__":
+    import json
+    import logging
 
-def download_from_bronze(gcs_path):
-    """
-    Download JSON from bronze
-    """
-    client = get_gcs_client()
-    bucket = client.bucket(BUCKET_NAME)
-    blob = bucket.blob(
-        f"bronze/{gcs_path}"
-    )
-    content = blob.download_as_text()
-    return json.loads(content)
+    logging.basicConfig(level=logging.INFO)
 
-def count_bronze_records(gcs_path):
-    """
-    Used by Airflow validation task
-    """
-    data = download_from_bronze(gcs_path)
-    if isinstance(data, dict) and "elements" in data:
-        return len(data["elements"])
-    return len(data) if isinstance(data, list) else 0
+    orders = simulate_orders()
+    drivers = simulate_drivers()
+
+    print(f"Total orders: {len(orders)}")
+    print(f"Total drivers: {len(drivers)}")
+
+    with open("orders_test.json", "w") as f:
+        json.dump(orders, f, indent=2)
+    with open("drivers_test.json", "w") as f:
+        json.dump(drivers, f, indent=2)
+
+    print("Done")
 ```
 ### Schema validation
 ```python
@@ -740,49 +722,87 @@ def validate_roads(osm_data: dict) -> dict:
 # airflow/dags/ingestion_dag.py
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-from datetime import datetime
-import sys
-sys.path.insert(0, '/path/to/your/project')
+from airflow.operators.empty import EmptyOperator
+from datetime import datetime, timedelta
+import logging
 
-from ingestion.overpass_client import fetch_roads
-from ingestion.data_simulator import simulate_orders, simulate_drivers
-from ingestion.bronze_writer import upload_to_bronze
+
+# Default args with retry logic
+default_args = {
+    "owner": "delivery-platform",
+    "depends_on_past": False,
+    "retries": 2,
+    "retry_delay": timedelta(minutes=5),
+    "email_on_failure": True,
+}
 
 def ingest_roads(**context):
+    from ingestion.overpass_client import fetch_roads
+    from ingestion.bronze_writer import upload_to_bronze
+    
     data = fetch_roads()
-    upload_to_bronze(data, f"roads/{context['ds']}/roads.json")
+    upload_to_bronze(
+        data,
+        f"roads/{context['ds']}/roads.json",
+        metadata={"source": "overpass_api", "record_count": len(data.get("elements", []))}
+    )
 
 def ingest_orders(**context):
+    from ingestion.data_simulator import simulate_orders
+    from ingestion.bronze_writer import upload_to_bronze
+    
     orders = simulate_orders(n=500)
-    upload_to_bronze(orders, f"orders/{context['ds']}/orders.json")
+    upload_to_bronze(
+        orders,
+        f"orders/{context['ds']}/orders.json",
+        metadata={"source": "simulator", "record_count": len(orders)}
+    )
 
 def ingest_drivers(**context):
+    from ingestion.data_simulator import simulate_drivers
+    from ingestion.bronze_writer import upload_to_bronze
+    
     drivers = simulate_drivers(n=25)
-    upload_to_bronze(drivers, f"drivers/{context['ds']}/drivers.json")
+    upload_to_bronze(
+        drivers,
+        f"drivers/{context['ds']}/drivers.json",
+        metadata={"source": "simulator", "record_count": len(drivers)}
+    )
 
 def validate_bronze(**context):
-    # Basic sanity check — fail the DAG if data is missing
     from ingestion.bronze_writer import count_bronze_records
+    from config import MIN_ROAD_ELEMENTS, DEFAULT_ORDER_COUNT
+    
     roads = count_bronze_records(f"roads/{context['ds']}/roads.json")
     orders = count_bronze_records(f"orders/{context['ds']}/orders.json")
-    assert roads > 100, f"Too few road elements: {roads}"
-    assert orders == 500, f"Expected 500 orders, got {orders}"
-    print(f"Validation passed: {roads} roads, {orders} orders")
+    
+    assert roads > MIN_ROAD_ELEMENTS, f"Too few road elements: {roads} (min: {MIN_ROAD_ELEMENTS})"
+    assert orders == DEFAULT_ORDER_COUNT, f"Expected {DEFAULT_ORDER_COUNT} orders, got {orders}"
+    
+    logging.info("Validation passed: %d roads, %d orders", roads, orders)
 
 with DAG(
-    dag_id='ingestion_pipeline',
+    dag_id="ingestion_pipeline",
+    default_args=default_args,
     start_date=datetime(2024, 1, 1),
-    schedule='@daily',
+    schedule="@daily",
     catchup=False,
-    tags=['bronze', 'ingestion'],
+    tags=["bronze", "ingestion"],
+    doc_md="""## Ingestion Pipeline
+    Fetches OSM road data and generates simulated delivery orders/drivers.
+    Uploads all data to the GCS Bronze layer.
+    """,
 ) as dag:
 
-    t_roads   = PythonOperator(task_id='ingest_roads',   python_callable=ingest_roads)
-    t_orders  = PythonOperator(task_id='ingest_orders',  python_callable=ingest_orders)
-    t_drivers = PythonOperator(task_id='ingest_drivers', python_callable=ingest_drivers)
-    t_validate = PythonOperator(task_id='validate_bronze', python_callable=validate_bronze)
+    start = EmptyOperator(task_id="start")
+    
+    t_roads = PythonOperator(task_id="ingest_roads", python_callable=ingest_roads)
+    t_orders = PythonOperator(task_id="ingest_orders", python_callable=ingest_orders)
+    t_drivers = PythonOperator(task_id="ingest_drivers", python_callable=ingest_drivers)
+    t_validate = PythonOperator(task_id="validate_bronze", python_callable=validate_bronze)
+    end = EmptyOperator(task_id="end")
 
-    [t_roads, t_orders, t_drivers] >> t_validate
+    start >> [t_roads, t_orders, t_drivers] >> t_validate >> end
 ```
 
 ### Learning Goals — Phase 1
@@ -803,52 +823,53 @@ Learn Spark fundamentals before adding Sedona complexity.
 
 ```python
 # jobs/bronze_to_silver.py (runs on Windows Spark cluster)
-from pyspark.sql import SparkSession
+import sys
+import logging
+from spark_utils import create_spark_session
 from pyspark.sql import functions as F
-from pyspark.sql.types import StructType, StructField, StringType, DoubleType, TimestampType
+from pyspark.sql.types import DoubleType
+from config import GCS_BUCKET_NAME
 
-def create_spark():
-    return SparkSession.builder \
-        .appName("BronzeToSilver") \
-        .config("spark.hadoop.google.cloud.auth.service.account.json.keyfile",
-                "/opt/bitnami/spark/conf/gcs-key.json") \
-        .config("spark.hadoop.fs.gs.impl",
-                "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem") \
-        .getOrCreate()
+logger = logging.getLogger(__name__)
 
-def clean_orders(spark, run_date):
-    raw_path = f"gs://delivery-data-lake/bronze/orders/{run_date}/"
+
+def clean_orders(spark, run_date: str) -> None:
+    raw_path = f"gs://{GCS_BUCKET_NAME}/bronze/orders/{run_date}/"
     df = spark.read.option("multiline", "true").json(raw_path)
 
-    cleaned = df \
-        .filter(F.col("lat").isNotNull() & F.col("lon").isNotNull()) \
-        .filter((F.col("lat").between(29.5, 30.5)) & (F.col("lon").between(31.0, 31.8))) \
-        .filter(F.col("order_id").isNotNull()) \
-        .withColumn("lat",  F.col("lat").cast(DoubleType())) \
-        .withColumn("lon",  F.col("lon").cast(DoubleType())) \
-        .withColumn("created_at", F.to_timestamp("created_at")) \
-        .withColumn("date_partition", F.lit(run_date)) \
+    cleaned = (
+        df
+        .filter(F.col("lat").isNotNull() & F.col("lon").isNotNull())
+        .filter((F.col("lat").between(29.5, 30.5)) & (F.col("lon").between(31.0, 31.8)))
+        .filter(F.col("order_id").isNotNull())
+        .withColumn("lat", F.col("lat").cast(DoubleType()))
+        .withColumn("lon", F.col("lon").cast(DoubleType()))
+        .withColumn("created_at", F.to_timestamp("created_at"))
+        .withColumn("date_partition", F.lit(run_date))
         .dropDuplicates(["order_id"])
+    )
 
-    # Data quality metrics
     total = df.count()
     valid = cleaned.count()
-    drop_rate = round((total - valid) / total * 100, 2)
-    print(f"Orders: {total} raw → {valid} clean ({drop_rate}% dropped)")
-    assert drop_rate < 5.0, f"Drop rate {drop_rate}% exceeds 5% threshold — check data quality"
+    drop_rate = round((total - valid) / total * 100, 2) if total > 0 else 0
+    logger.info("Orders: %d raw → %d clean (%.2f%% dropped)", total, valid, drop_rate)
 
-    silver_path = f"gs://delivery-data-lake/silver/orders/{run_date}/"
+    if drop_rate > 5.0:
+        raise ValueError(f"Drop rate {drop_rate}% exceeds 5% threshold")
+
+    silver_path = f"gs://{GCS_BUCKET}/silver/orders/{run_date}/"
     cleaned.write.mode("overwrite").parquet(silver_path)
-    print(f"Written to {silver_path}")
+    logger.info("Written to %s", silver_path)
+
 
 if __name__ == "__main__":
-    import sys
-    run_date = sys.argv[1]  # e.g. "2024-01-15"
-    spark = create_spark()
-    # ADD THIS LINE: Tells Spark to only log Warnings and Errors
-    spark.sparkContext.setLogLevel("WARN")
-    clean_orders(spark, run_date)
-    spark.stop()
+    logging.basicConfig(level=logging.INFO)
+    run_date = sys.argv[1]
+    spark = create_spark_session("BronzeToSilver")
+    try:
+        clean_orders(spark, run_date)
+    finally:
+        spark.stop()
 ```
 #### Test it inside docker container
 ```bash
@@ -970,71 +991,78 @@ spark-submit --master spark://spark-master:7077 --jars /opt/bitnami/spark/custom
 ### Week 7 — Road Network Processing
 
 ```python
-# jobs/road_network_processing.py (Windows Spark)
-from pyspark.sql import SparkSession
+# jobs/spatial_processing.py (runs on Windows Spark cluster)
+import sys
 from pyspark.sql import functions as F
-from sedona.register import SedonaRegistrator
-from sedona.utils import SedonaKryoRegistrator, KryoSerializer
+from spark_utils import create_spark_session
 
-def create_spark():
-    return SparkSession.builder \
-        .appName("RoadNetworkProcessing") \
-        .config("spark.serializer", KryoSerializer.getName) \
-        .config("spark.kryo.registrator", SedonaKryoRegistrator.getName) \
-        .config("spark.hadoop.google.cloud.auth.service.account.json.keyfile",
-                "/opt/bitnami/spark/conf/gcs-key.json") \
-        .config("spark.hadoop.fs.gs.impl",
-                "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem") \
-        .getOrCreate()
+def run_spatial_jobs(spark, run_date):
+    orders_path = f"gs://delivery-data-lake/silver/orders/{run_date}/"
+    orders = spark.read.parquet(orders_path)
+    orders = orders.withColumn(
+        "geometry",
+        F.expr("ST_Point(CAST(lon AS DECIMAL(24,20)), CAST(lat AS DECIMAL(24,20)))")
+    )
+    orders.createOrReplaceTempView("orders")
+    
+    # --- LEARNING EXERCISE 1: Distance between every order and city center ---
+    city_center_lon = 31.2357
+    city_center_lat = 30.0444
 
-def process_roads(spark, run_date):
-    SedonaRegistrator.registerAll(spark)
+    orders_with_distance = spark.sql(f"""
+        SELECT
+            order_id,
+            district,
+            priority,
+            lat, lon,
+            ST_Distance(
+                ST_Transform(geometry, 'EPSG:4326', 'EPSG:32636'),
+                ST_Transform(ST_Point({city_center_lon}, {city_center_lat}), 'EPSG:4326', 'EPSG:32636')
+            ) / 1000 AS dist_from_center_km
+        FROM orders
+    """)
+    # Why EPSG:32636? It's UTM Zone 36N — the correct metric projection for Cairo.
+    # ST_Distance on EPSG:4326 gives degrees, not meters.
 
-    raw_path = f"gs://delivery-data-lake/bronze/roads/{run_date}/"
-    roads_raw = spark.read.option("multiline", "true").json(raw_path)
+    # --- LEARNING EXERCISE 2: Delivery hotspot detection using ST_Buffer ---
+    hotspot_query = """
+            SELECT
+                district,
+                COUNT(*) as order_count,
+                ST_AsText(ST_Buffer(
+                    ST_Transform(ST_Centroid(ST_Union_Aggr(geometry)), 'EPSG:4326', 'EPSG:32636'),
+                    1000  -- 1km buffer around district centroid
+                )) as coverage_area_wkt
+            FROM orders
+            GROUP BY district
+        """
+    hotspots = spark.sql(hotspot_query)
+    hotspots.show()
 
-    # Explode OSM elements array
-    elements = roads_raw.select(F.explode("elements").alias("elem"))
-
-    # Extract road attributes
-    roads = elements.select(
-        F.col("elem.id").alias("road_id"),
-        F.col("elem.tags.highway").alias("road_type"),
-        F.col("elem.tags.maxspeed").alias("maxspeed_raw"),
-        F.col("elem.tags.name").alias("road_name"),
-        F.col("elem.tags.oneway").alias("is_oneway"),
-        F.col("elem.geometry").alias("geometry_nodes"),
-    ).filter(F.col("road_type").isNotNull())
-
-    # Parse speed: OSM maxspeed is a string like "60" or "60 mph"
-    roads = roads.withColumn(
-        "speed_kmh",
-        F.when(
-            F.col("maxspeed_raw").rlike("^[0-9]+$"),
-            F.col("maxspeed_raw").cast("int")
-        ).when(
-            F.col("maxspeed_raw").rlike("mph"),
-            (F.regexp_extract("maxspeed_raw", r"(\d+)", 1).cast("int") * 1.609).cast("int")
-        ).otherwise(
-            # Default speeds by road type (Cairo approximations)
-            F.when(F.col("road_type") == "motorway", 100)
-             .when(F.col("road_type") == "trunk", 80)
-             .when(F.col("road_type") == "primary", 60)
-             .when(F.col("road_type") == "secondary", 50)
-             .otherwise(30)
+    # --- LEARNING EXERCISE 3: Spatial join — assign orders to service zones ---
+    # (In a real project, zones come from a GeoJSON polygon file)
+    # For now, cluster by a grid
+    orders_gridded = orders.withColumn(
+        "grid_cell",
+        F.concat(
+            F.round(F.col("lat") * 10).cast("int").cast("string"),
+            F.lit("_"),
+            F.round(F.col("lon") * 10).cast("int").cast("string")
         )
     )
 
-    silver_path = f"gs://delivery-data-lake/silver/roads/{run_date}/"
-    roads.write.mode("overwrite").parquet(silver_path)
-    print(f"Roads written: {roads.count()} segments")
+    # --- Write Gold layer ---
+    gold_path = f"gs://delivery-data-lake/gold/orders_spatial/{run_date}/"
+    orders_with_distance.write.mode("overwrite").parquet(gold_path)
+    hotspots.write.mode("overwrite").parquet(f"gs://delivery-data-lake/gold/hotspots/{run_date}/")
+
+    print("Spatial processing complete")
 
 if __name__ == "__main__":
-    import sys
     run_date = sys.argv[1]
-    spark = create_spark()
-    spark.sparkContext.setLogLevel("WARN")
-    process_roads(spark, run_date)
+    # Use the shared utility to create the session, ensuring Sedona is enabled
+    spark = create_spark_session(app_name="SpatialProcessing", sedona=True)
+    run_spatial_jobs(spark, run_date)
     spark.stop()
 ```
 #### Test it inside docker container
@@ -1154,6 +1182,20 @@ def solve_vrp(orders, drivers, max_route_distance_m=50_000):
     drivers: list of dicts with lat, lon, driver_id, capacity_kg
     Returns: list of routes (one per driver)
     """
+    # ── Input validation ──
+    if not orders:
+        raise ValueError("No orders provided to VRP solver")
+    if not drivers:
+        raise ValueError("No drivers provided to VRP solver")
+    if len(drivers) > len(orders):
+        logger.warning(
+            "More drivers (%d) than orders (%d) — some drivers will be idle",
+            len(drivers), len(orders)
+        )
+
+    for o in orders:
+        if not all(k in o for k in ("lat", "lon", "order_id")):
+            raise ValueError(f"Order missing required fields: {o}")
     # Node 0 is the depot (city center / warehouse)
     depot_lat, depot_lon = 30.0444, 31.2357  # Cairo center
     depot = {"lat": depot_lat, "lon": depot_lon, "order_id": "DEPOT"}
@@ -1247,11 +1289,39 @@ def solve_vrp(orders, drivers, max_route_distance_m=50_000):
 
 ```python
 # optimization/vrp_constrained.py
-# Extends vrp_solver.py with capacity and time window constraints
+from ortools.constraint_solver import routing_enums_pb2
+from ortools.constraint_solver import pywrapcp
+import math
+import json
+
+def haversine_meters(lat1, lon1, lat2, lon2):
+    """Compute great-circle distance in meters between two coordinates."""
+    R = 6_371_000  # Earth radius in meters
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
+    return 2 * R * math.asin(math.sqrt(a))
+
+def build_distance_matrix(locations):
+    """
+    locations: list of (lat, lon) tuples
+    Returns NxN matrix of integer distances in meters
+    """
+    n = len(locations)
+    matrix = [[0] * n for _ in range(n)]
+    for i in range(n):
+        for j in range(n):
+            if i != j:
+                matrix[i][j] = int(haversine_meters(
+                    locations[i][0], locations[i][1],
+                    locations[j][0], locations[j][1]
+                ))
+    return matrix
 
 def solve_vrp_with_constraints(orders, drivers, depot_lat=30.0444, depot_lon=31.2357):
     depot = {"lat": depot_lat, "lon": depot_lon, "weight_kg": 0,
-             "window_start_min": 0, "window_end_min": 24*60}
+            "window_start_min": 0, "window_end_min": 24*60}
 
     all_nodes  = [depot] + orders
     locations  = [(n["lat"], n["lon"]) for n in all_nodes]
@@ -1362,29 +1432,21 @@ from airflow import DAG
 from airflow.operators.python import PythonOperator
 from datetime import datetime
 
+
 def run_optimization(**context):
     import os, json, sys
-    from google.cloud import storage
-    from dotenv import load_dotenv
-    load_dotenv()
-    key_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-    if not key_path:
-        raise ValueError("GOOGLE_APPLICATION_CREDENTIALS is not set in the .env file!")
-
-    sys.path.insert(0, '/Users/elhaiys/Desktop/Desktop/vs projects/smart-delivery-route-optimization-platform')
+    from storage.gcs_client import get_gcs_bucket
+    from config import GCS_BUCKET_NAME
     from optimization.vrp_constrained import solve_vrp_with_constraints
-    # run_date = context['ds']
-    run_date = "2026-06-23"
-    client   = storage.Client.from_service_account_json(key_path)
-    bucket   = client.bucket("delivery-data-lake")
-
+    run_date = context['ds']
+    bucket = get_gcs_bucket()
     # Load gold layer data
-    orders_blob  = bucket.blob(f"gold/orders_spatial/{run_date}/part-00000.parquet")
+    gcs_orders_path  = f"gs://{GCS_BUCKET_NAME}/gold/orders_spatial/{run_date}/"
     drivers_blob = bucket.blob(f"bronze/drivers/{run_date}/drivers.json")
 
     # (In practice, read parquet with pandas or pyarrow)
     import pandas as pd, io
-    orders_df  = pd.read_parquet(io.BytesIO(orders_blob.download_as_bytes()))
+    orders_df  = pd.read_parquet(gcs_orders_path)
     drivers    = json.loads(drivers_blob.download_as_text())
 
     orders = orders_df.to_dict("records")
@@ -1597,138 +1659,173 @@ import io
 import os
 import pandas as pd
 from google.cloud import storage
-from dotenv import load_dotenv
+from config import DB_CONFIG, GCS_CREDENTIALS_PATH, GCS_BUCKET_NAME
 
-load_dotenv()
+BATCH_SIZE = 500
 
-DB_CONFIG = {
-    "dbname":   "delivery_platform",
-    "user":     "postgres",
-    "password": os.getenv("DB_PASSWORD"), # Update this or use os.getenv("DB_PASSWORD")
-    "host":     "localhost",
-    "port":     5432,
-}
-
-def load_drivers(cur, bucket, run_date):
-    """Load drivers from Bronze JSON to satisfy the Foreign Key constraint."""
+def load_drivers(cur, bucket, run_date: str) -> int:
     blob = bucket.blob(f"bronze/drivers/{run_date}/drivers.json")
     if not blob.exists():
-        print("No drivers found for this date. Skipping driver load.")
-        return
-        
-    drivers = json.loads(blob.download_as_text())
-    
-    for driver in drivers:
-        cur.execute("""
-            INSERT INTO drivers (driver_id, location, home_district, capacity_kg, status)
-            VALUES (%s, ST_GeogFromText(%s), %s, %s, %s)
-            ON CONFLICT (driver_id) DO UPDATE 
-            SET location = EXCLUDED.location,
-                status = EXCLUDED.status,
-                last_updated_at = NOW()
-        """, (
-            driver["driver_id"],
-            f"POINT({driver['lon']} {driver['lat']})",
-            driver.get("district"),
-            driver.get("capacity_kg"),
-            driver.get("status", "available")
-        ))
-    print(f"Loaded/Updated {len(drivers)} drivers.")
+        logger.warning("No drivers found for %s", run_date)
+        return 0
 
-def load_orders(cur, bucket, run_date):
-    """Load spatially-enriched orders from Gold Parquet."""
+    drivers = json.loads(blob.download_as_text())
+
+    # ✅ Use execute_values for batch insert
+    from psycopg2.extras import execute_values
+
+    rows = [
+        (
+            d["driver_id"],
+            f"POINT({d['lon']} {d['lat']})",
+            d.get("district"),
+            d.get("capacity_kg"),
+            d.get("status", "available"),
+        )
+        for d in drivers
+    ]
+
+    execute_values(
+        cur,
+        """
+        INSERT INTO drivers (driver_id, location, home_district, capacity_kg, status)
+        VALUES %s
+        ON CONFLICT (driver_id) DO UPDATE
+        SET location = EXCLUDED.location,
+            status = EXCLUDED.status,
+            last_updated_at = NOW()
+        """,
+        rows,
+        template="(%s, ST_GeogFromText(%s), %s, %s, %s)",
+        page_size=BATCH_SIZE,
+    )
+    logger.info("Loaded/updated %d drivers", len(drivers))
+    return len(drivers)
+
+
+def load_orders(cur, bucket, run_date: str) -> int:
     prefix = f"gold/orders_spatial/{run_date}/"
     blobs = list(bucket.list_blobs(prefix=prefix))
-    parquet_blob = next((b for b in blobs if b.name.endswith(".parquet")), None)
-    
-    if not parquet_blob:
-        print("No order parquet files found. Skipping order load.")
-        return
+    parquet_blobs = [b for b in blobs if b.name.endswith(".parquet")]
 
-    orders_df = pd.read_parquet(io.BytesIO(parquet_blob.download_as_bytes()))
-    orders = orders_df.to_dict("records")
-    
-    for order in orders:
-        cur.execute("""
+    if not parquet_blobs:
+        logger.warning("No order parquet files found for %s", run_date)
+        return 0
+
+    from psycopg2.extras import execute_values
+
+    total_loaded = 0
+    for blob in parquet_blobs:
+        orders_df = pd.read_parquet(io.BytesIO(blob.download_as_bytes()))
+
+        rows = [
+            (
+                o["order_id"],
+                f"POINT({o['lon']} {o['lat']})",
+                o.get("district"),
+                o.get("priority"),
+                o.get("weight_kg"),
+                run_date,
+            )
+            for o in orders_df.to_dict("records")
+        ]
+
+        execute_values(
+            cur,
+            """
             INSERT INTO orders (order_id, location, district, priority, weight_kg, run_date)
-            VALUES (%s, ST_GeogFromText(%s), %s, %s, %s, %s)
+            VALUES %s
             ON CONFLICT (order_id) DO NOTHING
-        """, (
-            order["order_id"],
-            f"POINT({order['lon']} {order['lat']})",
-            order.get("district"),
-            order.get("priority"),
-            order.get("weight_kg"),
-            run_date
-        ))
-    print(f"Loaded {len(orders)} orders.")
+            """,
+            rows,
+            template="(%s, ST_GeogFromText(%s), %s, %s, %s, %s)",
+            page_size=BATCH_SIZE,
+        )
+        total_loaded += len(rows)
 
-def load_routes(cur, bucket, run_date):
-    """Load optimized routes from Gold JSON."""
+    logger.info("Loaded %d orders", total_loaded)
+    return total_loaded
+
+
+def load_routes(cur, bucket, run_date: str) -> int:
     blob = bucket.blob(f"gold/routes/{run_date}/routes.json")
     if not blob.exists():
-        print("No routes found. Skipping route load.")
-        return
-        
+        logger.warning("No routes found for %s", run_date)
+        return 0
+
     routes = json.loads(blob.download_as_text())
-        
+
+    from psycopg2.extras import execute_values
+
+    rows = []
     for route in routes:
-        # Build WKT LineString from stop sequence
         coords = ", ".join(f"{s['lon']} {s['lat']}" for s in route["stops"])
         linestring_wkt = f"LINESTRING({coords})" if len(route["stops"]) > 1 else None
 
-        cur.execute("""
-            INSERT INTO routes (driver_id, route_geometry, stop_sequence,
-                                total_distance_m, run_date)
-            VALUES (%s, ST_GeogFromText(%s), %s::jsonb, %s, %s)
-            ON CONFLICT DO NOTHING
-        """, (
+        rows.append((
             route["driver_id"],
             linestring_wkt,
             json.dumps(route["stops"]),
             route.get("total_distance_m"),
             run_date,
         ))
-    print(f"Loaded {len(routes)} routes.")
 
-def run_postgis_ingestion(run_date):
-    key_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-    client = storage.Client.from_service_account_json(key_path)
-    bucket = client.bucket("delivery-data-lake")
+    execute_values(
+        cur,
+        """
+        INSERT INTO routes (driver_id, route_geometry, stop_sequence,
+                            total_distance_m, run_date)
+        VALUES %s
+        ON CONFLICT DO NOTHING
+        """,
+        rows,
+        template="(%s, ST_GeogFromText(%s), %s::jsonb, %s, %s)",
+        page_size=BATCH_SIZE,
+    )
+    logger.info("Loaded %d routes", len(routes))
+    return len(routes)
+
+
+def run_postgis_ingestion(run_date: str) -> dict:
+    """Returns a summary dict for Airflow XCom or logging."""
+    client = storage.Client.from_service_account_json(GCS_CREDENTIALS_PATH)
+    bucket = client.bucket(GCS_BUCKET_NAME)
 
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
 
     try:
-        # 1. Load Drivers FIRST (Satisfies Foreign Keys)
-        load_drivers(cur, bucket, run_date)
-        
-        # 2. Load Orders (Needed for KPIs)
-        load_orders(cur, bucket, run_date)
-        
-        # 3. Load Routes
-        load_routes(cur, bucket, run_date)
+        n_drivers = load_drivers(cur, bucket, run_date)
+        n_orders  = load_orders(cur, bucket, run_date)
+        n_routes  = load_routes(cur, bucket, run_date)
 
-        # 4. Refresh KPI materialized view
-        print("Refreshing Materialized View...")
+        logger.info("Refreshing materialized view...")
         cur.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY daily_kpis;")
 
         conn.commit()
-        print(f"✅ Successfully ingested all PostGIS data for {run_date}")
-        
-    except Exception as e:
+        summary = {
+            "run_date": run_date,
+            "drivers_loaded": n_drivers,
+            "orders_loaded": n_orders,
+            "routes_loaded": n_routes,
+        }
+        logger.info("✅ PostGIS ingestion complete: %s", summary)
+        return summary
+
+    except Exception:
         conn.rollback()
-        print(f"❌ Failed to load data into PostGIS: {e}")
-        raise e
+        logger.exception("❌ Failed to load data into PostGIS")
+        raise
     finally:
         cur.close()
         conn.close()
 
+
 if __name__ == "__main__":
     import sys
-    # For local testing: python storage/postgis_loader.py 2026-06-23
-    test_date = sys.argv if len(sys.argv) > 1 else "2026-06-23"
-    run_postgis_ingestion(test_date)
+    logging.basicConfig(level=logging.INFO)
+    date = sys.argv[1] if len(sys.argv) > 1 else "2026-06-23"
+    run_postgis_ingestion(date)
 ```
 
 ### Learning Goals — Phase 4
@@ -1755,17 +1852,12 @@ dashboard/
     03_hotspots.py    # Delivery density heatmap
     04_drivers.py     # Per-driver performance
   db.py               # PostGIS query helpers
-  gcs.py              # GCS data loader
 ```
 
 ### Main Dashboard App
 ```python
 # dashboard/app.py
 import streamlit as st
-import folium
-from streamlit_folium import st_folium
-import psycopg2
-import pandas as pd
 
 st.set_page_config(
     page_title="Delivery Route Optimizer",
@@ -1776,92 +1868,94 @@ st.set_page_config(
 st.title("Smart Delivery Route Optimization Platform")
 st.caption("Cairo — Powered by Spark · Sedona · OR-Tools · PostGIS")
 
-# --- KPI Cards ---
-conn = psycopg2.connect(dbname="delivery_platform", user="postgres",
-                        password="your_password", host="localhost")
-
-kpis = pd.read_sql("SELECT * FROM daily_kpis ORDER BY run_date DESC LIMIT 1", conn)
-
-if not kpis.empty:
-    row = kpis.iloc[0]
-    col1, col2, col3, col4, col5 = st.columns(5)
-    col1.metric("Total Orders",         int(row["total_orders"]))
-    col2.metric("Active Drivers",       int(row["active_drivers"]))
-    col3.metric("Avg Route (km)",       f"{row['avg_route_km']:.1f}")
-    col4.metric("Total km Driven",      f"{row['total_km_driven']:.0f}")
-    col5.metric("Orders per Driver",    f"{row['avg_orders_per_driver']:.1f}")
-
-# --- Route Map ---
-st.subheader("Optimized Routes")
-run_date = st.date_input("Select date")
-
-routes_df = pd.read_sql(
-    "SELECT driver_id, stop_sequence, total_distance_m FROM routes WHERE run_date = %s",
-    conn, params=[str(run_date)]
-)
-
-# Cairo center
-m = folium.Map(location=[30.0444, 31.2357], zoom_start=11, tiles="CartoDB positron")
-
-colors = ["red","blue","green","purple","orange","darkred","lightred","beige",
-          "darkblue","darkgreen","cadetblue","darkpurple","white","pink","lightblue",
-          "lightgreen","gray","black","lightgray"]
-
-for idx, row in routes_df.iterrows():
-    stops   = row["stop_sequence"]
-    color   = colors[idx % len(colors)]
-    coords  = [[s["lat"], s["lon"]] for s in stops]
-    if len(coords) >= 2:
-        folium.PolyLine(coords, color=color, weight=3, opacity=0.8,
-                        tooltip=f"Driver: {row['driver_id']} | {row['total_distance_m']/1000:.1f} km").add_to(m)
-    for i, s in enumerate(stops):
-        folium.CircleMarker(
-            [s["lat"], s["lon"]],
-            radius=6, color=color, fill=True,
-            popup=f"Stop {i+1} — Order {s['order_id'][:8]}"
-        ).add_to(m)
-
-st_folium(m, width=None, height=550)
-conn.close()
+st.markdown("""
+### Welcome to the Operations Command Center
+Use the sidebar to navigate through the operational layers:
+* **01 Overview:** Executive KPI summary and high-level platform health.
+* **02 Routes Map:** Deep dive into OR-Tools generated geometries.
+* **03 Hotspots:** Spatial density analysis of incoming orders.
+* **04 Drivers:** Individual fleet performance and capacity metrics.
+""")
 ```
 
-### Full End-to-End Master DAG
+### Full End-to-End DAG delivery_platform_pipeline
 ```python
-# airflow/dags/master_pipeline_dag.py
+# airflow/dags/delivery_platform_pipeline.py
 from airflow import DAG
-from airflow.operators.trigger_dagrun import TriggerDagRunOperator
-from datetime import datetime
+from airflow.operators.python import PythonOperator
+from airflow.operators.empty import EmptyOperator
+from airflow.providers.ssh.operators.ssh import SSHOperator
+from datetime import datetime, timedelta
 
+# 1. Bring in your configurations & functions
+from ingestion_dag import ingest_roads, ingest_orders, ingest_drivers, validate_bronze
+from optimization_dag import run_optimization
+
+SPARK_SUBMIT = (
+    'powershell.exe -NonInteractive -NoProfile -Command '
+    '\"docker exec -u 0 delivery-platform-spark-master-1 spark-submit '
+    '--master spark://spark-master:7077 '
+    '--driver-memory 2G '
+    '--executor-memory 8G '
+    '--jars /opt/bitnami/spark/custom_jars/sedona-spark-shaded.jar,/opt/bitnami/spark/custom_jars/geotools-wrapper.jar,/opt/bitnami/spark/custom_jars/gcs-connector.jar '
+    '/opt/bitnami/spark/jobs/{script} {run_date}\"'
+)
+
+default_args = {
+    "owner": "delivery-platform",
+    "depends_on_past": False,
+    "retries": 2,
+    "retry_delay": timedelta(minutes=5),
+}
+
+# 2. Define the single unified pipeline
 with DAG(
-    dag_id='master_pipeline',
+    dag_id="delivery_platform_pipeline",
+    default_args=default_args,
     start_date=datetime(2024, 1, 1),
-    schedule='@daily',
+    schedule="@daily",
     catchup=False,
-    tags=['master'],
+    tags=["production", "unified"],
 ) as dag:
 
-    ingest = TriggerDagRunOperator(
-        task_id='trigger_ingestion',
-        trigger_dag_id='ingestion_pipeline',
-        wait_for_completion=True,
-        conf={"run_date": "{{ ds }}"},
+    # --- PHASE 1: INGESTION ---
+    start = EmptyOperator(task_id="start_pipeline")
+    t_roads = PythonOperator(task_id="ingest_roads", python_callable=ingest_roads)
+    t_orders = PythonOperator(task_id="ingest_orders", python_callable=ingest_orders)
+    t_drivers = PythonOperator(task_id="ingest_drivers", python_callable=ingest_drivers)
+    v_bronze = PythonOperator(task_id="validate_bronze", python_callable=validate_bronze)
+
+    # --- PHASE 2: SPARK PROCESSING ---
+    clean_orders = SSHOperator(
+        task_id='clean_orders',
+        ssh_conn_id='windows_spark',
+        command=SPARK_SUBMIT.format(script="bronze_to_silver.py", run_date="{{ ds }}"),
+        cmd_timeout=600,
+    )
+    clean_roads = SSHOperator(
+        task_id='clean_roads',
+        ssh_conn_id='windows_spark',
+        command=SPARK_SUBMIT.format(script="road_network_processing.py", run_date="{{ ds }}"),
+        cmd_timeout=600,
+    )
+    spatial_join = SSHOperator(
+        task_id='spatial_join_gold',
+        ssh_conn_id='windows_spark',
+        command=SPARK_SUBMIT.format(script="spatial_processing.py", run_date="{{ ds }}"),
+        cmd_timeout=600,
     )
 
-    process = TriggerDagRunOperator(
-        task_id='trigger_spark_processing',
-        trigger_dag_id='spark_processing',
-        wait_for_completion=True,
-        conf={"run_date": "{{ ds }}"},
+    # --- PHASE 3: OPTIMIZATION ---
+    optimize = PythonOperator(
+        task_id="run_route_optimization",
+        python_callable=run_optimization
     )
+    end = EmptyOperator(task_id="end_pipeline")
 
-    optimize = TriggerDagRunOperator(
-        task_id='trigger_route_optimization',
-        trigger_dag_id='route_optimization',
-        wait_for_completion=True,
-        conf={"run_date": "{{ ds }}"},
-    )
-
-    ingest >> process >> optimize
+    # --- CLEAR, SEQUENTIAL DEPENDENCIES ---
+    start >> [t_roads, t_orders, t_drivers] >> v_bronze
+    v_bronze >> [clean_orders, clean_roads] >> spatial_join
+    spatial_join >> optimize >> end
 ```
 
 ---
