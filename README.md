@@ -153,35 +153,6 @@ Streamlit Dashboard
 
 ---
 
-## Repository Structure
-
-```text
-smart-delivery-route-optimization/
-│
-├── airflow/
-│   ├── dags/
-│   └── plugins/
-│
-├── spark_jobs/
-│
-├── geospatial_analysis/
-│
-├── optimization/
-│
-├── database/
-│
-├── dashboard/
-│
-├── docker/
-│
-├── data/
-│
-├── tests/
-│
-└── README.md
-```
-
----
 
 ## Future Enhancements
 
