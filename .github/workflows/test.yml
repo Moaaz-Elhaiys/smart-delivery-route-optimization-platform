@@ -22,6 +22,12 @@ jobs:
       - name: Sync dependencies
         run: uv sync
 
+      - name: Set test environment
+        run: |
+          echo "GCS_BUCKET_NAME=test-bucket" >> "$GITHUB_ENV"
+          echo "GOOGLE_APPLICATION_CREDENTIALS=/tmp/test-credentials.json" >> "$GITHUB_ENV"
+          echo "DB_PASSWORD=test-password" >> "$GITHUB_ENV"
+
       - name: Run Tests
         run: uv run pytest tests/ -v --tb=short
 
