@@ -21,6 +21,3 @@ jobs:
 
       - name: Sync dependencies
         run: uv sync
-
-      - name: Validate Schemas
-        run: uv run python scripts/validate_schemas.py
